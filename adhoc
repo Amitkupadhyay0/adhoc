@@ -1,0 +1,28 @@
+import pandas as pd
+import pyarrow.parquet as pq
+import gc
+
+# Step 1 — define your chunk reader
+# We'll read Parquet row groups one by one (Parquet is split into row groups internally)
+
+def read_chunk(parquet_file_path):
+    pq_file = pq.ParquetFile(parquet_file_path)
+    for i in range(pq_file.num_row_groups):
+        yield pq_file.read_row_group(i).to_pandas()
+
+# Step 2 — Now read chunks and concat safely
+
+df_total = pd.DataFrame()   # Empty DataFrame to start
+
+for chunk in read_chunk("your_file.parquet"):
+    df_total = pd.concat([df_total, chunk], ignore_index=True)
+    
+    # Optional: print progress
+    print(f"Chunk processed → current df_total shape: {df_total.shape}")
+    
+    # Clean up memory
+    del chunk
+    gc.collect()
+
+# Done — df_total now has the full DataFrame!
+print("✅ Done reading file! Final DataFrame shape:", df_total.shape)
