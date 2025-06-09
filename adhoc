@@ -55,3 +55,33 @@ def string_to_bigram_number_set_of_frozensets(s):
     token_strings = s.split(';')
     return {frozenset(map(int, token.split(','))) for token in token_strings if token}
 
+
+
+####### No need
+def token_to_bigram_numbers(token):
+    token = clean_name(token)
+    bigram_numbers = set()
+    for i in range(len(token) - 1):
+        c1 = CHAR_TO_INDEX[token[i]]
+        c2 = CHAR_TO_INDEX[token[i+1]]
+        bigram_index = c1 * 27 + c2
+        bigram_numbers.add(bigram_index)
+    return bigram_numbers
+
+def name_to_nested_bigram_string(name):
+    tokens = name.lower().split()  # simple split on space
+    token_bigram_strs = []
+    for token in tokens:
+        bigram_numbers = token_to_bigram_numbers(token)
+        token_str = ','.join(map(str, bigram_numbers))
+        token_bigram_strs.append(token_str)
+    return ';'.join(token_bigram_strs)
+###
+conversion
+def string_to_bigram_number_set_of_frozensets(s):
+    if not s:
+        return set()
+    token_strings = s.split(';')
+    return {frozenset(map(int, token.split(','))) for token in token_strings if token}
+
+
