@@ -1,18 +1,43 @@
-# 1. List of bigrams → string
-def bigram_list_to_string(bigram_list):
-    return ",".join(bigram_list)
+import string
 
-# 2. List of list of bigrams → string
-def bigram_list_of_lists_to_string(bigram_list_of_lists):
-    return ";".join([",".join(sublist) for sublist in bigram_list_of_lists])
+# Build char -> index map
+CHAR_TO_INDEX = {ch: i for i, ch in enumerate(string.ascii_lowercase)}
+CHAR_TO_INDEX[' '] = 26
 
-# 3. String → set of bigrams
-def string_to_bigram_set(s):
-    return set(s.split(",")) if s else set()
+# Inverse map (optional)
+INDEX_TO_CHAR = {i: ch for ch, i in CHAR_TO_INDEX.items()}
 
-# 4. String → set of frozensets of bigrams
-def string_to_bigram_set_of_frozensets(s):
+# Function to clean name (lowercase + only a-z and space)
+def clean_name(name):
+    name = name.lower()
+    return ''.join(ch if ch in CHAR_TO_INDEX else ' ' for ch in name)
+
+# Function to get bigram indices (number space 0..728)
+def name_to_bigram_numbers(name):
+    name = clean_name(name)
+    bigram_numbers = []
+    for i in range(len(name) - 1):
+        c1 = CHAR_TO_INDEX[name[i]]
+        c2 = CHAR_TO_INDEX[name[i+1]]
+        bigram_index = c1 * 27 + c2
+        bigram_numbers.append(bigram_index)
+    return bigram_numbers
+
+# Convert bigram_numbers list to string (to store in Parquet safely)
+def bigram_numbers_to_string(bigram_numbers):
+    return ','.join(map(str, bigram_numbers))
+
+# Convert back to set of bigram indices
+def string_to_bigram_number_set(s):
+    return set(map(int, s.split(','))) if s else set()
+
+# Nested bigram numbers (list of list) to string
+def nested_bigram_numbers_to_string(nested_bigram_numbers):
+    return ';'.join([','.join(map(str, sublist)) for sublist in nested_bigram_numbers])
+
+# Convert back to set of frozensets
+def string_to_bigram_number_set_of_frozensets(s):
     if not s:
         return set()
-    groups = s.split(";")
-    return {frozenset(group.split(",")) for group in groups if group}
+    groups = s.split(';')
+    return {frozenset(map(int, group.split(','))) for group in groups if group}
