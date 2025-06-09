@@ -41,3 +41,17 @@ def string_to_bigram_number_set_of_frozensets(s):
         return set()
     groups = s.split(';')
     return {frozenset(map(int, group.split(','))) for group in groups if group}
+
+
+# Nested bigram number list -> string (token1: bigram set, token2: bigram set ...)
+def nested_bigram_numbers_to_string(nested_bigram_numbers):
+    # nested_bigram_numbers: list of list of int
+    return ';'.join([','.join(map(str, bigram_list)) for bigram_list in nested_bigram_numbers])
+
+# Convert back to set of frozensets
+def string_to_bigram_number_set_of_frozensets(s):
+    if not s:
+        return set()
+    token_strings = s.split(';')
+    return {frozenset(map(int, token.split(','))) for token in token_strings if token}
+
