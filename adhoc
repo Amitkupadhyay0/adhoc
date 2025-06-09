@@ -1,28 +1,18 @@
-import pandas as pd
-import pyarrow.parquet as pq
-import gc
+# 1. List of bigrams → string
+def bigram_list_to_string(bigram_list):
+    return ",".join(bigram_list)
 
-# Step 1 — define your chunk reader
-# We'll read Parquet row groups one by one (Parquet is split into row groups internally)
+# 2. List of list of bigrams → string
+def bigram_list_of_lists_to_string(bigram_list_of_lists):
+    return ";".join([",".join(sublist) for sublist in bigram_list_of_lists])
 
-def read_chunk(parquet_file_path):
-    pq_file = pq.ParquetFile(parquet_file_path)
-    for i in range(pq_file.num_row_groups):
-        yield pq_file.read_row_group(i).to_pandas()
+# 3. String → set of bigrams
+def string_to_bigram_set(s):
+    return set(s.split(",")) if s else set()
 
-# Step 2 — Now read chunks and concat safely
-
-df_total = pd.DataFrame()   # Empty DataFrame to start
-
-for chunk in read_chunk("your_file.parquet"):
-    df_total = pd.concat([df_total, chunk], ignore_index=True)
-    
-    # Optional: print progress
-    print(f"Chunk processed → current df_total shape: {df_total.shape}")
-    
-    # Clean up memory
-    del chunk
-    gc.collect()
-
-# Done — df_total now has the full DataFrame!
-print("✅ Done reading file! Final DataFrame shape:", df_total.shape)
+# 4. String → set of frozensets of bigrams
+def string_to_bigram_set_of_frozensets(s):
+    if not s:
+        return set()
+    groups = s.split(";")
+    return {frozenset(group.split(",")) for group in groups if group}
