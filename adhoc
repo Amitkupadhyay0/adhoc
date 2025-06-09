@@ -83,5 +83,45 @@ def string_to_bigram_number_set_of_frozensets(s):
         return set()
     token_strings = s.split(';')
     return {frozenset(map(int, token.split(','))) for token in token_strings if token}
+######
+## New
+import pandas as pd
+
+# Example name cleaning function (you can customize)
+def clean_name(name):
+    # Lowercase and strip extra spaces
+    return ' '.join(name.lower().strip().split())
+
+# 1️⃣ Single-letter token exists?
+def has_single_letter_token(name):
+    tokens = name.split()
+    return any(len(token) == 1 for token in tokens)
+
+# 2️⃣ Initials of each token
+def initials_of_name(name):
+    tokens = name.split()
+    return ''.join(token[0] for token in tokens if token)
+
+# 3️⃣ Sort tokens and concatenate
+def sort_and_concatenate_tokens(name):
+    tokens = name.split()
+    tokens_sorted = sorted(tokens)
+    return ''.join(tokens_sorted)
+
+# Example DataFrame
+df = pd.DataFrame({
+    'name': ['amit kumar', 't shivam', 'shivam kumar dubay', 's a b c', 'john']
+})
+
+# Clean name first → optional but good practice
+df['clean_name'] = df['name'].apply(clean_name)
+
+# Now apply the 3 functions
+df['has_single_letter_token'] = df['clean_name'].apply(has_single_letter_token)
+df['initials'] = df['clean_name'].apply(initials_of_name)
+df['sorted_concatenated_name'] = df['clean_name'].apply(sort_and_concatenate_tokens)
+
+# Show result
+print(df[['name', 'has_single_letter_token', 'initials', 'sorted_concatenated_name']])
 
 
