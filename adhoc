@@ -1,127 +1,84 @@
-import string
-
-# Build char -> index map
-CHAR_TO_INDEX = {ch: i for i, ch in enumerate(string.ascii_lowercase)}
-CHAR_TO_INDEX[' '] = 26
-
-# Inverse map (optional)
-INDEX_TO_CHAR = {i: ch for ch, i in CHAR_TO_INDEX.items()}
-
-# Function to clean name (lowercase + only a-z and space)
-def clean_name(name):
-    name = name.lower()
-    return ''.join(ch if ch in CHAR_TO_INDEX else ' ' for ch in name)
-
-# Function to get bigram indices (number space 0..728)
-def name_to_bigram_numbers(name):
-    name = clean_name(name)
-    bigram_numbers = []
-    for i in range(len(name) - 1):
-        c1 = CHAR_TO_INDEX[name[i]]
-        c2 = CHAR_TO_INDEX[name[i+1]]
-        bigram_index = c1 * 27 + c2
-        bigram_numbers.append(bigram_index)
-    return bigram_numbers
-
-# Convert bigram_numbers list to string (to store in Parquet safely)
-def bigram_numbers_to_string(bigram_numbers):
-    return ','.join(map(str, bigram_numbers))
-
-# Convert back to set of bigram indices
-def string_to_bigram_number_set(s):
-    return set(map(int, s.split(','))) if s else set()
-
-# Nested bigram numbers (list of list) to string
-def nested_bigram_numbers_to_string(nested_bigram_numbers):
-    return ';'.join([','.join(map(str, sublist)) for sublist in nested_bigram_numbers])
-
-# Convert back to set of frozensets
-def string_to_bigram_number_set_of_frozensets(s):
-    if not s:
-        return set()
-    groups = s.split(';')
-    return {frozenset(map(int, group.split(','))) for group in groups if group}
-
-
-# Nested bigram number list -> string (token1: bigram set, token2: bigram set ...)
-def nested_bigram_numbers_to_string(nested_bigram_numbers):
-    # nested_bigram_numbers: list of list of int
-    return ';'.join([','.join(map(str, bigram_list)) for bigram_list in nested_bigram_numbers])
-
-# Convert back to set of frozensets
-def string_to_bigram_number_set_of_frozensets(s):
-    if not s:
-        return set()
-    token_strings = s.split(';')
-    return {frozenset(map(int, token.split(','))) for token in token_strings if token}
-
-
-
-####### No need
-def token_to_bigram_numbers(token):
-    token = clean_name(token)
-    bigram_numbers = set()
-    for i in range(len(token) - 1):
-        c1 = CHAR_TO_INDEX[token[i]]
-        c2 = CHAR_TO_INDEX[token[i+1]]
-        bigram_index = c1 * 27 + c2
-        bigram_numbers.add(bigram_index)
-    return bigram_numbers
-
-def name_to_nested_bigram_string(name):
-    tokens = name.lower().split()  # simple split on space
-    token_bigram_strs = []
-    for token in tokens:
-        bigram_numbers = token_to_bigram_numbers(token)
-        token_str = ','.join(map(str, bigram_numbers))
-        token_bigram_strs.append(token_str)
-    return ';'.join(token_bigram_strs)
-###
-conversion
-def string_to_bigram_number_set_of_frozensets(s):
-    if not s:
-        return set()
-    token_strings = s.split(';')
-    return {frozenset(map(int, token.split(','))) for token in token_strings if token}
-######
-## New
 import pandas as pd
+from tqdm import tqdm
 
-# Example name cleaning function (you can customize)
-def clean_name(name):
-    # Lowercase and strip extra spaces
-    return ' '.join(name.lower().strip().split())
+list_col = ['Unique_DEA', 'Unique_DMN', 'Unique_DMA','Unique_DEN', 'Unique_DEM', 'Unique_DNA', 
+            'DNM_MISS', 'DNE_MISS','DAM_MISS', 'DAN_MISS', 'DAE_MISS']
 
-# 1️⃣ Single-letter token exists?
-def has_single_letter_token(name):
-    tokens = name.split()
-    return any(len(token) == 1 for token in tokens)
+# Initialize global dicts
+global_index_to_cluster = {}
+value_to_clusterid = {}
 
-# 2️⃣ Initials of each token
-def initials_of_name(name):
-    tokens = name.split()
-    return ''.join(token[0] for token in tokens if token)
+# Load existing data
+existing_df = df1[df1['CLUSTER_ID'] != -1]
 
-# 3️⃣ Sort tokens and concatenate
-def sort_and_concatenate_tokens(name):
-    tokens = name.split()
-    tokens_sorted = sorted(tokens)
-    return ''.join(tokens_sorted)
+# Build global dictionaries from existing data
+for idx, row in existing_df.iterrows():
+    cluster_id = row['CLUSTER_ID']
+    global_index_to_cluster[idx] = cluster_id
+    for col in list_col:
+        val = row[col]
+        if pd.notna(val):
+            if val not in value_to_clusterid:
+                value_to_clusterid[val] = set()
+            value_to_clusterid[val].add(cluster_id)
 
-# Example DataFrame
-df = pd.DataFrame({
-    'name': ['amit kumar', 't shivam', 'shivam kumar dubay', 's a b c', 'john']
-})
+# Start cluster_counter from max existing cluster id + 1
+if existing_df['CLUSTER_ID'].max() > 0:
+    cluster_counter = existing_df['CLUSTER_ID'].max() + 1
+else:
+    cluster_counter = 1
 
-# Clean name first → optional but good practice
-df['clean_name'] = df['name'].apply(clean_name)
+# Prepare conflict record list
+conflict_records = []
 
-# Now apply the 3 functions
-df['has_single_letter_token'] = df['clean_name'].apply(has_single_letter_token)
-df['initials'] = df['clean_name'].apply(initials_of_name)
-df['sorted_concatenated_name'] = df['clean_name'].apply(sort_and_concatenate_tokens)
+# Process new data
+new_df = df1[df1['CLUSTER_ID'] == -1]
 
-# Show result
-print(df[['name', 'has_single_letter_token', 'initials', 'sorted_concatenated_name']])
+# Process new data per group (DOB_X or you can skip groupby if not needed)
+for key, group in tqdm(new_df.groupby("DOB_X")):
+    for idx, row in group.iterrows():
+        matched_clusters = set()
+        
+        # Find existing cluster ids matching any value in this row
+        for col in list_col:
+            val = row[col]
+            if pd.notna(val) and val in value_to_clusterid:
+                matched_clusters.update(value_to_clusterid[val])
+        
+        # Decide cluster_id assignment
+        if not matched_clusters:
+            # No match → assign new cluster_id
+            assigned_cluster = cluster_counter
+            cluster_counter += 1
+        else:
+            # Match found → pick first cluster_id
+            assigned_cluster = min(matched_clusters)
+            
+            # If conflict (more than 1 cluster_id matched), record conflict
+            if len(matched_clusters) > 1:
+                conflict_records.append({
+                    'new_data_index': idx,
+                    'new_data_policy_number': row['CUST_ID'],  # Replace with your root policy column name
+                    'matched_existing_cluster_ids': list(sorted(matched_clusters)),
+                    'assigned_cluster_id': assigned_cluster
+                })
+        
+        # Update global index → cluster_id mapping
+        global_index_to_cluster[idx] = assigned_cluster
+        
+        # Update value_to_clusterid with current row values
+        for col in list_col:
+            val = row[col]
+            if pd.notna(val):
+                if val not in value_to_clusterid:
+                    value_to_clusterid[val] = set()
+                value_to_clusterid[val].add(assigned_cluster)
 
+# Final update of df1
+df1.loc[list(global_index_to_cluster.keys()), 'CLUSTER_ID'] = list(global_index_to_cluster.values())
 
+# Build df_conflict
+df_conflict = pd.DataFrame(conflict_records)
+
+# Optional: Show how many conflicts were detected
+print(f"Conflicts detected: {len(df_conflict)}")
