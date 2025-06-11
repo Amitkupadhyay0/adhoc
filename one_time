@@ -1,0 +1,50 @@
+import pandas as pd
+from tqdm import tqdm
+
+list_col = ['Unique_DEA', 'Unique_DMN', 'Unique_DMA', 'Unique_DEN', 'Unique_DEM', 'Unique_DNA',
+            'DNM_MISS', 'DNE_MISS', 'DAM_MISS', 'DAN_MISS', 'DAE_MISS']
+
+df1['CLUSTER_ID'] = -1
+cluster_counter = 1
+
+# Build value to index mapping just once
+value_to_indices = {}
+for col in list_col:
+    col_values = df1[[col]].dropna()
+    for val, idx in zip(col_values[col], col_values.index):
+        if val not in value_to_indices:
+            value_to_indices[val] = set()
+        value_to_indices[val].add(idx)
+
+# Global mapping from index to cluster ID
+global_index_to_cluster = {}
+
+# Group by DOB_X (as in original logic)
+for key, group in tqdm(df1.groupby("DOB_X")):
+    group_indices = set(group.index)
+
+    for idx in group.index:
+        connected_indices = set()
+
+        # Get all linked indices via value lookup (fast!)
+        row = df1.loc[idx, list_col]
+        for col_val in row:
+            if pd.notna(col_val) and col_val in value_to_indices:
+                connected_indices.update(value_to_indices[col_val] & group_indices)
+
+        # Check for existing clusters
+        existing_clusters = {global_index_to_cluster[i] for i in connected_indices if i in global_index_to_cluster}
+        existing_clusters.discard(None)
+
+        if existing_clusters:
+            assigned_cluster = min(existing_clusters)
+        else:
+            assigned_cluster = cluster_counter
+            cluster_counter += 1
+
+        # Update cluster IDs
+        for i in connected_indices:
+            global_index_to_cluster[i] = assigned_cluster
+
+# Final update in one go
+df1.loc[list(global_index_to_cluster.keys()), 'CLUSTER_ID'] = list(global_index_to_cluster.values())
