@@ -1,61 +1,15 @@
 import pandas as pd
 from collections import defaultdict
-from tqdm import tqdm
 
-# Assumes df1 already loaded and 'CLUSTER_ID' column exists
-list_col = [
-    'Unique_DEA', 'Unique_DMN', 'Unique_DMA', 'Unique_DEN', 'Unique_DEM', 'Unique_DNA',
-    'DNM_MISS', 'DNE_MISS', 'DAM_MISS', 'DAN_MISS', 'DAE_MISS'
-]
+# INPUT: df1 has both old and new data
+# Old data already has valid CLUSTER_ID; new data has CLUSTER_ID = -1
 
-# Initialize
-df_new = df1[df1['CLUSTER_ID'] == -1].copy()
-df_old = df1[df1['CLUSTER_ID'] != -1].copy()
+list_col = ['Unique_DEA', 'Unique_DMN', 'Unique_DMA', 'Unique_DEN', 'Unique_DEM', 'Unique_DNA',
+            'DNM_MISS', 'DNE_MISS', 'DAM_MISS', 'DAN_MISS', 'DAE_MISS']
 
-# Start counter from max+1
-cluster_counter = df_old['CLUSTER_ID'].max() + 1
+df1 = df1.reset_index(drop=True)
 
-# Build value → existing index mapping for fast lookup
-value_to_cluster = defaultdict(set)
-for col in list_col:
-    temp = df_old[[col, 'CLUSTER_ID']].dropna()
-    for val, grp in temp.groupby(col):
-        value_to_cluster[val].update(grp['CLUSTER_ID'].unique())
-
-# Build value → new indices
-value_to_new_idx = defaultdict(set)
-for col in list_col:
-    temp = df_new[[col]].dropna()
-    for idx, val in temp[col].items():
-        value_to_new_idx[val].add(idx)
-
-# Initialize
-new_idx_to_cluster = {}
-conflict_records = []
-
-# Step 1: Assign based on overlap with old data
-for idx, row in tqdm(df_new.iterrows(), total=len(df_new)):
-    matched_clusters = set()
-    for col in list_col:
-        val = row[col]
-        if pd.notna(val) and val in value_to_cluster:
-            matched_clusters.update(value_to_cluster[val])
-    
-    if not matched_clusters:
-        continue  # Will handle in next step
-    
-    assigned_cluster = min(matched_clusters)
-    new_idx_to_cluster[idx] = assigned_cluster
-    
-    if len(matched_clusters) > 1:
-        conflict_records.append({
-            'ROOT_POLICY_NUMBER': row['CUST_ID'],
-            'matched_index': idx,
-            'matched_clusters': sorted(list(matched_clusters)),
-            'assigned_cluster_id': assigned_cluster
-        })
-
-# Step 2: Transitive propagation within new data (Union-Find style)
+# Step 1: Build a union-find (disjoint set)
 parent = {}
 
 def find(x):
@@ -65,29 +19,64 @@ def find(x):
     return x
 
 def union(x, y):
-    root_x, root_y = find(x), find(y)
+    root_x = find(x)
+    root_y = find(y)
     if root_x != root_y:
         parent[root_y] = root_x
 
-# Build unions for new → new matches
-for val, indices in value_to_new_idx.items():
-    indices = list(indices)
-    for i in range(1, len(indices)):
-        union(indices[0], indices[i])
+# Step 2: Build value → row mapping
+value_map = defaultdict(list)
+for col in list_col:
+    for idx, val in df1[col].items():
+        if pd.notna(val):
+            value_map[val].append(idx)
 
-# Assign new cluster IDs to unassigned new groups
-group_to_cluster = {}
-for idx in df_new.index:
-    if idx in new_idx_to_cluster:
-        continue  # already assigned
-    root = find(idx)
-    if root not in group_to_cluster:
-        group_to_cluster[root] = cluster_counter
-        cluster_counter += 1
-    new_idx_to_cluster[idx] = group_to_cluster[root]
+# Step 3: Union all rows sharing a common value
+for val, idx_list in value_map.items():
+    for i in range(1, len(idx_list)):
+        union(idx_list[0], idx_list[i])
 
-# Step 3: Update final CLUSTER_IDs
-df1.loc[df1['CLUSTER_ID'] == -1, 'CLUSTER_ID'] = df1.loc[df1['CLUSTER_ID'] == -1].index.map(new_idx_to_cluster)
+# Step 4: Build groupings
+groups = defaultdict(list)
+for idx in df1.index:
+    groups[find(idx)].append(idx)
 
-# Step 4: Return conflict records
+# Step 5: Assign cluster IDs
+existing_clusters = df1[df1['CLUSTER_ID'] != -1].set_index(df1[df1['CLUSTER_ID'] != -1].index)['CLUSTER_ID'].to_dict()
+max_cluster = max(existing_clusters.values()) if existing_clusters else 0
+new_cluster = max_cluster + 1
+
+idx_to_cluster = {}  # final output
+
+conflict_records = []
+
+for group_indices in groups.values():
+    existing_ids = set(idx for idx in group_indices if df1.at[idx, 'CLUSTER_ID'] != -1)
+    existing_cluster_ids = {df1.at[idx, 'CLUSTER_ID'] for idx in existing_ids}
+
+    if existing_cluster_ids:
+        assigned_cluster = min(existing_cluster_ids)
+    else:
+        assigned_cluster = new_cluster
+        new_cluster += 1
+
+    for idx in group_indices:
+        if df1.at[idx, 'CLUSTER_ID'] == -1:
+            idx_to_cluster[idx] = assigned_cluster
+
+    # If conflicting (multiple old cluster IDs), log conflict
+    if len(existing_cluster_ids) > 1:
+        root_idx = group_indices[0]
+        conflict_records.append({
+            'ROOT_POLICY_NUMBER': df1.at[root_idx, 'CUST_ID'],
+            'matched_index': root_idx,
+            'matched_clusters': sorted(list(existing_cluster_ids)),
+            'assigned_cluster_id': assigned_cluster
+        })
+
+# Step 6: Update cluster IDs in df1
+for idx, cluster in idx_to_cluster.items():
+    df1.at[idx, 'CLUSTER_ID'] = cluster
+
+# Output: conflict log
 df_conflict = pd.DataFrame(conflict_records)
