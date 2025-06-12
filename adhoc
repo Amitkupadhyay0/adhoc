@@ -1,71 +1,82 @@
 from collections import defaultdict
 
-list_col = ['Unique_DEA', 'Unique_DMN', 'Unique_DMA','Unique_DEN', 'Unique_DEM', 'Unique_DNA',
-            'DNM_MISS', 'DNE_MISS','DAM_MISS', 'DAN_MISS', 'DAE_MISS']
+# assume df has columns:
+#   DOB_X, unique_number_combined  (old clusters ≠ -1, new = -1)
+#   plus the Unique_DE* / Unique_DG* columns
 
-df1 = df1.reset_index(drop=True)
+# your starting point
+counter = max(int(df_pl["unique_number_combined"].max()), 1, max_value)
 
-# Split into old and new
-df_old = df1[df1['CLUSTER_ID'] != -1]
-df_new = df1[df1['CLUSTER_ID'] == -1]
+# list of your keys
+keys = ["Unique_DEA","Unique_DEM","Unique_DMA","Unique_DGM","Unique_DGN","Unique_DGA","Unique_DGE"]
 
-# Dict: old_idx → cluster
-old_idx_to_cluster = df_old['CLUSTER_ID'].to_dict()
-max_cluster_id = df_old['CLUSTER_ID'].max()
-new_idx_to_cluster = {}
+# prepare storage
+conflicts = []
+updates = {}   # idx → assigned cluster
 
-conflict_records = []
+# disjoint-set (union-find)
+parent = {}
+def find(i):
+    parent.setdefault(i, i)
+    if parent[i] != i:
+        parent[i] = find(parent[i])
+    return parent[i]
 
-# Group both old and new by DOB
-old_groups = df_old.groupby('DOB')
-new_groups = df_new.groupby('DOB')
+def union(i, j):
+    ri, rj = find(i), find(j)
+    if ri != rj:
+        parent[rj] = ri
 
-cluster_counter = max_cluster_id + 1
+# process per-DOB
+for dob, grp in df.groupby("DOB_X"):
+    idxs = grp.index.tolist()
+    # build inverted index value → [idx, …] within this DOB
+    val_map = defaultdict(list)
+    for k in keys:
+        for i, v in grp[k].items():
+            if pd.notna(v):
+                val_map[v].append(i)
+    # union all rows that share a value
+    for lst in val_map.values():
+        first = lst[0]
+        for other in lst[1:]:
+            union(first, other)
 
-for dob, df_new_group in new_groups:
-    if dob not in old_groups.groups:
-        # All new rows for this DOB → new clusters
-        for idx in df_new_group.index:
-            new_idx_to_cluster[idx] = cluster_counter
-            cluster_counter += 1
-        continue
+    # collect components
+    comps = defaultdict(list)
+    for i in idxs:
+        comps[find(i)].append(i)
 
-    df_old_group = old_groups.get_group(dob)
+    # for each component, decide its cluster
+    for comp in comps.values():
+        # which old clusters live here?
+        old_cids = { df.at[i, "unique_number_combined"]
+                     for i in comp
+                     if df.at[i, "unique_number_combined"] != -1 }
 
-    # Step 1: Build val → old idx (only within this DOB)
-    val_to_old_idx = defaultdict(set)
-    for col in list_col:
-        for idx, val in df_old_group[col].items():
-            if pd.notna(val):
-                val_to_old_idx[val].add(idx)
-
-    # Step 2: For each new row in this DOB group
-    for idx, row in df_new_group.iterrows():
-        matched_clusters = set()
-        for col in list_col:
-            val = row[col]
-            if pd.notna(val):
-                matched_clusters.update(old_idx_to_cluster.get(i) for i in val_to_old_idx.get(val, []) if i in old_idx_to_cluster)
-
-        matched_clusters.discard(None)
-
-        if matched_clusters:
-            assigned_cluster = min(matched_clusters)
-            new_idx_to_cluster[idx] = assigned_cluster
-
-            if len(matched_clusters) > 1:
-                conflict_records.append({
-                    'ROOT_POLICY_NUMBER': row['CUST_ID'],
-                    'matched_index': idx,
-                    'matched_clusters': sorted(list(matched_clusters)),
-                    'assigned_cluster_id': assigned_cluster
+        if old_cids:
+            assigned = min(old_cids)
+            if len(old_cids) > 1:
+                # log conflict once per component
+                conflicts.append({
+                    "ROOT_POLICY_NUMBER": df.at[comp[0], "CUST_ID"],
+                    "matched_indices": comp,
+                    "matched_clusters": sorted(old_cids),
+                    "assigned_cluster_id": assigned
                 })
         else:
-            new_idx_to_cluster[idx] = cluster_counter
-            cluster_counter += 1
+            # brand-new component
+            assigned = counter
+            counter += 1
 
-# Step 3: Update df1
-for idx, cid in new_idx_to_cluster.items():
-    df1.at[idx, 'CLUSTER_ID'] = cid
+        # apply only to the new rows in this comp
+        for i in comp:
+            if df.at[i, "unique_number_combined"] == -1:
+                updates[i] = assigned
 
-df_conflict = pd.DataFrame(conflict_records)
+# now push your updates back into df
+for i, cid in updates.items():
+    df.at[i, "unique_number_combined"] = cid
+
+# turn conflict log into a DataFrame
+df_conflict = pd.DataFrame(conflicts)
