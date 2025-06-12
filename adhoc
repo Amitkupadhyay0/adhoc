@@ -1,20 +1,20 @@
 from collections import defaultdict
+import pandas as pd
 
-# assume df has columns:
-#   DOB_X, unique_number_combined  (old clusters ≠ -1, new = -1)
-#   plus the Unique_DE* / Unique_DG* columns
-
-# your starting point
+# your starting counter
 counter = max(int(df_pl["unique_number_combined"].max()), 1, max_value)
 
-# list of your keys
-keys = ["Unique_DEA","Unique_DEM","Unique_DMA","Unique_DGM","Unique_DGN","Unique_DGA","Unique_DGE"]
+# full list of rule-based columns
+keys = [
+    'Unique_DEA', 'Unique_DMN', 'Unique_DMA', 'Unique_DEN',
+    'Unique_DEM', 'Unique_DNA', 'DNM_MISS', 'DNE_MISS',
+    'DAM_MISS', 'DAN_MISS', 'DAE_MISS'
+]
 
-# prepare storage
 conflicts = []
-updates = {}   # idx → assigned cluster
+updates = {}
 
-# disjoint-set (union-find)
+# union-find setup
 parent = {}
 def find(i):
     parent.setdefault(i, i)
@@ -27,37 +27,40 @@ def union(i, j):
     if ri != rj:
         parent[rj] = ri
 
-# process per-DOB
+# process per-DOB group
 for dob, grp in df.groupby("DOB_X"):
     idxs = grp.index.tolist()
-    # build inverted index value → [idx, …] within this DOB
+
+    # build inverted index: value → list of indices
     val_map = defaultdict(list)
     for k in keys:
         for i, v in grp[k].items():
             if pd.notna(v):
                 val_map[v].append(i)
-    # union all rows that share a value
+
+    # union all rows sharing any value
     for lst in val_map.values():
         first = lst[0]
         for other in lst[1:]:
             union(first, other)
 
-    # collect components
+    # collect each connected component
     comps = defaultdict(list)
     for i in idxs:
         comps[find(i)].append(i)
 
-    # for each component, decide its cluster
+    # assign clusters per component
     for comp in comps.values():
-        # which old clusters live here?
-        old_cids = { df.at[i, "unique_number_combined"]
-                     for i in comp
-                     if df.at[i, "unique_number_combined"] != -1 }
+        # find any existing cluster IDs in this comp
+        old_cids = {
+            df.at[i, "unique_number_combined"]
+            for i in comp
+            if df.at[i, "unique_number_combined"] != -1
+        }
 
         if old_cids:
             assigned = min(old_cids)
             if len(old_cids) > 1:
-                # log conflict once per component
                 conflicts.append({
                     "ROOT_POLICY_NUMBER": df.at[comp[0], "CUST_ID"],
                     "matched_indices": comp,
@@ -65,18 +68,17 @@ for dob, grp in df.groupby("DOB_X"):
                     "assigned_cluster_id": assigned
                 })
         else:
-            # brand-new component
             assigned = counter
             counter += 1
 
-        # apply only to the new rows in this comp
+        # apply to new rows only
         for i in comp:
             if df.at[i, "unique_number_combined"] == -1:
                 updates[i] = assigned
 
-# now push your updates back into df
+# write back updates
 for i, cid in updates.items():
     df.at[i, "unique_number_combined"] = cid
 
-# turn conflict log into a DataFrame
+# conflicts DataFrame
 df_conflict = pd.DataFrame(conflicts)
