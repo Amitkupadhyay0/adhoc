@@ -1,101 +1,44 @@
-import pandas as pd
-from collections import defaultdict
+import pandas as pd import numpy as np from itertools import combinations from collections import defaultdict from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor from scipy.stats import gaussian_kde
 
-# ── Inputs ─────────────────────────────────────────────────────────────────────
-# df: your full DataFrame, with columns:
-#   - "DOB_X"
-#   - "unique_number_combined" (old clusters ≠ -1; new = -1)
-#   - "CUST_ID"
-#   - the 11 Unique_* / *_MISS columns below
-#
-# df_pl and max_value are just used to seed your counter; adapt as needed.
+--- Sample Real Data (Replace with your own) ---
 
-counter =
-    int(df_pl["unique_number_combined"].max()
+df_real = pd.DataFrame({ 'age': [23, 35, 45, 31, 28, 40, 60], 'gender': ['M', 'F', 'M', 'F', 'F', 'M', 'F'], 'income': [40000, 55000, 72000, 50000, 43000, 68000, 70000], 'plan': ['Silver', 'Gold', 'Gold', 'Silver', 'Silver', 'Platinum', 'Platinum'], 'region': ['North', 'East', 'West', 'North', 'South', 'West', 'East'] })
 
-keys = [
-    'Unique_DEA', 'Unique_DMN', 'Unique_DMA', 'Unique_DEN',
-    'Unique_DEM', 'Unique_DNA', 'DNM_MISS', 'DNE_MISS',
-    'DAM_MISS', 'DAN_MISS', 'DAE_MISS'
-]
+--- Step 1: Compute Mutual Information Between Columns ---
 
-# ── Prep storage ───────────────────────────────────────────────────────────────
-conflicts = []            # list of dicts you’ll turn into df_conflict
-updates   = {}            # idx → newly assigned cluster for new rows
+def compute_mutual_info(df): mi_matrix = pd.DataFrame(index=df.columns, columns=df.columns, data=0.0) for col1, col2 in combinations(df.columns, 2): joint = pd.crosstab(df[col1], df[col2], normalize=True) p1 = df[col1].value_counts(normalize=True) p2 = df[col2].value_counts(normalize=True) mi = 0 for i in joint.index: for j in joint.columns: if joint.at[i, j] > 0: mi += joint.at[i, j] * np.log(joint.at[i, j] / (p1[i] * p2[j])) mi_matrix.at[col1, col2] = mi mi_matrix.at[col2, col1] = mi return mi_matrix.fillna(0)
 
-# ── Union-Find (Disjoint-Set) Helpers ─────────────────────────────────────────
-parent = {}
-def find(i):
-    parent.setdefault(i, i)
-    if parent[i] != i:
-        parent[i] = find(parent[i])
-    return parent[i]
+mi_scores = compute_mutual_info(df_real)
 
-def union(i, j):
-    ri, rj = find(i), find(j)
-    if ri != rj:
-        parent[rj] = ri
+--- Step 2: Build Dependency Tree ---
 
-# ── Main Loop: per-DOB grouping ────────────────────────────────────────────────
-for dob, grp in df.groupby("DOB_X"):
-    idxs = grp.index.tolist()
+def build_dependency_tree(mi_matrix): nodes = list(mi_matrix.columns) visited = set() edges = [] current = nodes[0] visited.add(current) while len(visited) < len(nodes): max_score = -1 next_node = None chosen_edge = None for u in visited: for v in nodes: if v not in visited: score = mi_matrix.at[u, v] if score > max_score: max_score = score next_node = v chosen_edge = (u, v) edges.append(chosen_edge) visited.add(next_node) return edges
 
-    # 1) Build inverted index value → [indices] within this DOB
-    val_map = defaultdict(list)
-    for k in keys:
-        for i, v in grp[k].items():
-            if pd.notna(v):
-                val_map[v].append(i)
+tree_edges = build_dependency_tree(mi_scores)
 
-    # 2) Union all rows sharing any single value
-    for lst in val_map.values():
-        first = lst[0]
-        for other in lst[1:]:
-            union(first, other)
+--- Step 3: Convert Tree to DAG ---
 
-    # 3) Collect connected components
-    comps = defaultdict(list)
-    for i in idxs:
-        comps[find(i)].append(i)
+def build_dag(tree_edges, root): dag = defaultdict(list) visited = set() def dfs(node): visited.add(node) for u, v in tree_edges: if u == node and v not in visited: dag[u].append(v) dfs(v) elif v == node and u not in visited: dag[v].append(u) dfs(u) dfs(root) return dag
 
-    # 4) For each component, decide & assign cluster
-    for comp in comps.values():
-        # old cluster IDs present in this component
-        old_cids = {
-            df.at[i, "unique_number_combined"]
-            for i in comp
-            if df.at[i, "unique_number_combined"] != -1
-        }
-        # new-row indices in this component
-        new_idxs = [i for i in comp if df.at[i, "unique_number_combined"] == -1]
+dag = build_dag(tree_edges, root='age')
 
-        # choose assigned cluster
-        if old_cids:
-            assigned = min(old_cids)
-        else:
-            assigned = counter
-            counter += 1
+--- Step 4: Train Models for Each Node ---
 
-        # record assignment for each new row
-        for i in new_idxs:
-            updates[i] = assigned
+def train_models(df, dag): models = {} for parent, children in dag.items(): for child in children: X = df[[parent]].copy() y = df[child] if y.dtype == 'O' or y.dtype.name == 'category': model = DecisionTreeClassifier() model.fit(X, y) models[(child, parent)] = model else: model = DecisionTreeRegressor() model.fit(X, y) models[(child, parent)] = model for col in df.columns: if all(col != child for (child, _) in models.keys()): if df[col].dtype == 'O' or df[col].dtype.name == 'category': prob_dist = df[col].value_counts(normalize=True) models[(col, None)] = prob_dist else: kde = gaussian_kde(df[col]) models[(col, None)] = kde return models
 
-        # **only** log if it's truly a conflict **and** involves new rows
-        if len(old_cids) > 1 and new_idxs:
-            for i in new_idxs:
-                conflicts.append({
-                    "ROOT_POLICY_NUMBER":   df.at[i, "CUST_ID"],
-                    "matched_index":        i,
-                    "matched_clusters":     sorted(old_cids),
-                    "assigned_cluster_id":  assigned
-                })
+models = train_models(df_real, dag)
 
-# ── Apply updates back to df ─────────────────────────────────────────────────
-for i, cid in updates.items():
-    df.at[i, "unique_number_combined"] = cid
+--- Step 5: Sampling Helper ---
 
-# ── Build the conflict DataFrame ───────────────────────────────────────────────
-df_conflict = pd.DataFrame(conflicts).drop_duplicates().reset_index(drop=True)
+def sample_value(model, parent_val=None, categorical=False): if parent_val is None: if categorical: return np.random.choice(model.index, p=model.values) else: return model.resample(1)[0] else: pred = model.predict([[parent_val]])[0] if categorical: return pred else: return np.random.normal(pred, 5000)  # add slight noise
 
-# ── Now df has all new rows clustered, old clusters untouched,
-#     and df_conflict lists only true new-row conflicts. ────────────────────────
+--- Step 6: Generate a Synthetic Row ---
+
+def generate_synthetic_row(dag, models): row = {} topo_order = [] def dfs(node): if node not in topo_order: for child in dag.get(node, []): dfs(child) topo_order.append(node) dfs('age') for col in reversed(topo_order): parents = [p for (child, p) in models if child == col and p is not None] if not parents: model = models[(col, None)] is_cat = isinstance(model, pd.Series) row[col] = sample_value(model, categorical=is_cat) else: parent = parents[0] model = models[(col, parent)] is_cat = df_real[col].dtype == 'O' or df_real[col].dtype.name == 'category' row[col] = sample_value(model, row[parent], categorical=is_cat) return row
+
+--- Step 7: Generate Full Synthetic Dataset ---
+
+synthetic_data = [generate_synthetic_row(dag, models) for _ in range(len(df_real))] df_synthetic = pd.DataFrame(synthetic_data)
+
+print("\nSynthetic Data:") print(df_synthetic)
+
