@@ -1,0 +1,44 @@
+import pandas as pd import numpy as np from itertools import combinations from collections import defaultdict from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor from scipy.stats import gaussian_kde
+
+--- Sample Real Data (Replace with your own) ---
+
+df_real = pd.DataFrame({ 'age': [23, 35, 45, 31, 28, 40, 60], 'gender': ['M', 'F', 'M', 'F', 'F', 'M', 'F'], 'income': [40000, 55000, 72000, 50000, 43000, 68000, 70000], 'plan': ['Silver', 'Gold', 'Gold', 'Silver', 'Silver', 'Platinum', 'Platinum'], 'region': ['North', 'East', 'West', 'North', 'South', 'West', 'East'] })
+
+--- Step 1: Compute Mutual Information Between Columns ---
+
+def compute_mutual_info(df): mi_matrix = pd.DataFrame(index=df.columns, columns=df.columns, data=0.0) for col1, col2 in combinations(df.columns, 2): joint = pd.crosstab(df[col1], df[col2], normalize=True) p1 = df[col1].value_counts(normalize=True) p2 = df[col2].value_counts(normalize=True) mi = 0 for i in joint.index: for j in joint.columns: if joint.at[i, j] > 0: mi += joint.at[i, j] * np.log(joint.at[i, j] / (p1[i] * p2[j])) mi_matrix.at[col1, col2] = mi mi_matrix.at[col2, col1] = mi return mi_matrix.fillna(0)
+
+mi_scores = compute_mutual_info(df_real)
+
+--- Step 2: Build Dependency Tree ---
+
+def build_dependency_tree(mi_matrix): nodes = list(mi_matrix.columns) visited = set() edges = [] current = nodes[0] visited.add(current) while len(visited) < len(nodes): max_score = -1 next_node = None chosen_edge = None for u in visited: for v in nodes: if v not in visited: score = mi_matrix.at[u, v] if score > max_score: max_score = score next_node = v chosen_edge = (u, v) edges.append(chosen_edge) visited.add(next_node) return edges
+
+tree_edges = build_dependency_tree(mi_scores)
+
+--- Step 3: Convert Tree to DAG ---
+
+def build_dag(tree_edges, root): dag = defaultdict(list) visited = set() def dfs(node): visited.add(node) for u, v in tree_edges: if u == node and v not in visited: dag[u].append(v) dfs(v) elif v == node and u not in visited: dag[v].append(u) dfs(u) dfs(root) return dag
+
+dag = build_dag(tree_edges, root='age')
+
+--- Step 4: Train Models for Each Node ---
+
+def train_models(df, dag): models = {} for parent, children in dag.items(): for child in children: X = df[[parent]].copy() y = df[child] if y.dtype == 'O' or y.dtype.name == 'category': model = DecisionTreeClassifier() model.fit(X, y) models[(child, parent)] = model else: model = DecisionTreeRegressor() model.fit(X, y) models[(child, parent)] = model for col in df.columns: if all(col != child for (child, _) in models.keys()): if df[col].dtype == 'O' or df[col].dtype.name == 'category': prob_dist = df[col].value_counts(normalize=True) models[(col, None)] = prob_dist else: kde = gaussian_kde(df[col]) models[(col, None)] = kde return models
+
+models = train_models(df_real, dag)
+
+--- Step 5: Sampling Helper ---
+
+def sample_value(model, parent_val=None, categorical=False): if parent_val is None: if categorical: return np.random.choice(model.index, p=model.values) else: return model.resample(1)[0] else: pred = model.predict([[parent_val]])[0] if categorical: return pred else: return np.random.normal(pred, 5000)  # add slight noise
+
+--- Step 6: Generate a Synthetic Row ---
+
+def generate_synthetic_row(dag, models): row = {} topo_order = [] def dfs(node): if node not in topo_order: for child in dag.get(node, []): dfs(child) topo_order.append(node) dfs('age') for col in reversed(topo_order): parents = [p for (child, p) in models if child == col and p is not None] if not parents: model = models[(col, None)] is_cat = isinstance(model, pd.Series) row[col] = sample_value(model, categorical=is_cat) else: parent = parents[0] model = models[(col, parent)] is_cat = df_real[col].dtype == 'O' or df_real[col].dtype.name == 'category' row[col] = sample_value(model, row[parent], categorical=is_cat) return row
+
+--- Step 7: Generate Full Synthetic Dataset ---
+
+synthetic_data = [generate_synthetic_row(dag, models) for _ in range(len(df_real))] df_synthetic = pd.DataFrame(synthetic_data)
+
+print("\nSynthetic Data:") print(df_synthetic)
+
