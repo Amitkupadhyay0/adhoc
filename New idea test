@@ -1,0 +1,79 @@
+import pandas as pd import numpy as np from scipy.stats import ks_2samp, chi2_contingency, entropy, ttest_ind, pearsonr from sklearn.metrics import mutual_info_score import matplotlib.pyplot as plt import seaborn as sns
+
+--- Evaluation Tests Between Real and Synthetic Data ---
+
+def evaluate_synthetic_quality(df_real, df_synth): print("\n--- Statistical Comparison Between Real and Synthetic Data ---") results = {}
+
+for col in df_real.columns:
+    if df_real[col].dtype == 'O' or df_real[col].dtype.name == 'category':
+        real_counts = df_real[col].value_counts()
+        synth_counts = df_synth[col].value_counts()
+        combined = pd.concat([real_counts, synth_counts], axis=1).fillna(0)
+        stat, p, _, _ = chi2_contingency(combined.T)
+        ent_real = entropy(real_counts + 1)
+        ent_synth = entropy(synth_counts + 1)
+        results[col] = {
+            'type': 'categorical',
+            'chi2_stat': stat, 
+            'p_value': p,
+            'entropy_diff': abs(ent_real - ent_synth)
+        }
+    else:
+        stat_ks, p_ks = ks_2samp(df_real[col], df_synth[col])
+        stat_t, p_t = ttest_ind(df_real[col], df_synth[col], equal_var=False)
+        results[col] = {
+            'type': 'numerical',
+            'ks_stat': stat_ks,
+            'ks_p': p_ks,
+            't_stat': stat_t,
+            't_p': p_t,
+            'mean_real': df_real[col].mean(),
+            'mean_synth': df_synth[col].mean(),
+            'std_diff': abs(df_real[col].std() - df_synth[col].std())
+        }
+return results
+
+--- Correlation Matrix Comparison ---
+
+def compare_correlations(df_real, df_synth): num_cols = df_real.select_dtypes(include=[np.number]).columns corr_real = df_real[num_cols].corr() corr_synth = df_synth[num_cols].corr() diff = (corr_real - corr_synth).abs() return diff
+
+--- Mutual Information Matrix Comparison ---
+
+def compare_mutual_info(df_real, df_synth): mi_real = pd.DataFrame(index=df_real.columns, columns=df_real.columns) mi_synth = pd.DataFrame(index=df_synth.columns, columns=df_synth.columns)
+
+for col1 in df_real.columns:
+    for col2 in df_real.columns:
+        mi_real.loc[col1, col2] = mutual_info_score(df_real[col1], df_real[col2])
+        mi_synth.loc[col1, col2] = mutual_info_score(df_synth[col1], df_synth[col2])
+
+mi_real = mi_real.astype(float)
+mi_synth = mi_synth.astype(float)
+return (mi_real - mi_synth).abs()
+
+--- Plot Comparison (Optional Visual Aid) ---
+
+def plot_distributions(df_real, df_synth): for col in df_real.columns: plt.figure(figsize=(6, 3)) if df_real[col].dtype in [np.float64, np.int64]: sns.kdeplot(df_real[col], label='Real', fill=True) sns.kdeplot(df_synth[col], label='Synthetic', fill=True) else: real_counts = df_real[col].value_counts(normalize=True) synth_counts = df_synth[col].value_counts(normalize=True) compare_df = pd.DataFrame({ 'Real': real_counts, 'Synthetic': synth_counts }).fillna(0) compare_df.plot(kind='bar') plt.title(f'Distribution: {col}') plt.legend() plt.tight_layout() plt.show()
+
+--- Run All Comparisons ---
+
+def run_full_comparison(df_real, df_synth): results = evaluate_synthetic_quality(df_real, df_synth) corr_diff = compare_correlations(df_real, df_synth) mi_diff = compare_mutual_info(df_real, df_synth)
+
+print("\n--- Column-wise Test Results ---")
+for col, res in results.items():
+    print(f"\nColumn: {col} ({res['type']})")
+    for k, v in res.items():
+        if k != 'type':
+            print(f"  {k}: {v:.4f}")
+
+print("\n--- Correlation Matrix Difference (abs) ---")
+print(corr_diff.round(3))
+
+print("\n--- Mutual Information Difference (abs) ---")
+print(mi_diff.round(3))
+
+plot_distributions(df_real, df_synth)
+
+--- Example Call (replace df_real and df_synthetic accordingly) ---
+
+run_full_comparison(df_real, df_synthetic)
+
