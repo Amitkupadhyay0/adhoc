@@ -1,0 +1,68 @@
+import re
+import pandas as pd
+
+# -----------------
+# Helpers
+# -----------------
+def normalize(s: str) -> str:
+    if not isinstance(s, str): 
+        return ""
+    return re.sub(r'[^a-z0-9]', '', s.lower())
+
+def bigrams(s: str):
+    s = normalize(s)
+    return set(s[i:i+2] for i in range(len(s)-1)) if len(s) > 1 else set()
+
+def jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+# -----------------
+# Main function
+# -----------------
+def find_duplicates(new_member: dict, df: pd.DataFrame,
+                    name_threshold: float = 0.85,
+                    addr_threshold: float = 0.80) -> pd.DataFrame:
+    """
+    Given a new member and dataframe of same DOB members,
+    return potential duplicates based on rules:
+      - name similarity >= threshold (bigram Jaccard)
+      - and (address similarity >= threshold OR exact email OR exact mobile)
+    """
+
+    # Preprocess new member
+    name_b = bigrams(new_member.get("name", ""))
+    addr_b = bigrams(new_member.get("address", ""))
+    email = (new_member.get("email") or "").strip().lower()
+    mob = re.sub(r'\D+', '', new_member.get("mob") or "")
+
+    matched_indices = []
+
+    for idx, row in df.iterrows():
+        # 1) Name similarity
+        row_name_b = bigrams(row.get("name", ""))
+        name_sim = jaccard(name_b, row_name_b)
+        if name_sim < name_threshold:
+            continue
+
+        # 2) Secondary check (address OR email OR mobile)
+        passed = False
+
+        # address check
+        row_addr_b = bigrams(row.get("address", ""))
+        if jaccard(addr_b, row_addr_b) >= addr_threshold:
+            passed = True
+
+        # email exact
+        elif email and email == str(row.get("email", "")).strip().lower():
+            passed = True
+
+        # mobile exact (digits only)
+        elif mob and mob == re.sub(r'\D+', '', str(row.get("mob", ""))):
+            passed = True
+
+        if passed:
+            matched_indices.append(idx)
+
+    return df.loc[matched_indices].copy()
