@@ -1,0 +1,49 @@
+import os
+import resource
+import time
+import pandas as pd
+
+def benchmark_function(func, configs):
+    results = []
+
+    for mem_gb, cores in configs:
+        # --- Limit CPU cores ---
+        os.sched_setaffinity(0, range(cores))
+
+        # --- Limit Memory (soft limit, may crash if exceeded) ---
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        resource.setrlimit(resource.RLIMIT_AS, (mem_gb * 1024**3, hard))
+
+        # --- Measure execution time ---
+        start = time.perf_counter()
+        try:
+            func()
+            status = "OK"
+        except MemoryError:
+            status = "MemoryError"
+        except Exception as e:
+            status = str(e)
+        end = time.perf_counter()
+
+        results.append({
+            "Memory (GB)": mem_gb,
+            "Cores": cores,
+            "Time (s)": round(end - start, 4),
+            "Status": status
+        })
+
+    return pd.DataFrame(results)
+
+# -----------------------------
+# Example: define your function
+# -----------------------------
+def my_function():
+    # Dummy heavy task for testing
+    x = [i**2 for i in range(20_000_00)]  # adjust size for testing
+    return sum(x)
+
+# Configurations to test
+configs = [(4,4), (6,6), (8,8), (16,16)]
+
+df = benchmark_function(my_function, configs)
+df
