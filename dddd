@@ -1,210 +1,34 @@
-#!/usr/bin/env python3
-"""
-PDF -> Page-wise structured OCR pipeline for scanned forms (typed + handwritten).
-
-Outputs:
- - extracted_{pdf_basename}.json  (per-page list of regions with bbox + text + conf)
- - individual page images in ./pages/
-"""
-
-import os
-import json
-import argparse
-from pdf2image import convert_from_path
+from transformers import AutoProcessor, VisionEncoderDecoderModel
 from PIL import Image
-import numpy as np
-import cv2
 import torch
 
-# Layout detection
-import layoutparser as lp
+# -------------------------------
+# 1. Load PARSeq model + processor
+# -------------------------------
+model_id = "vkurtin/parseq"   # Hugging Face PARSeq model
 
-# PaddleOCR
-from paddleocr import PaddleOCR
+processor = AutoProcessor.from_pretrained(model_id)
+model = VisionEncoderDecoderModel.from_pretrained(model_id).to("cuda" if torch.cuda.is_available() else "cpu")
 
-# TrOCR (handwritten fallback)
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+# -------------------------------
+# 2. Load handwritten image
+# -------------------------------
+image_path = "handwritten_sample.jpg"  # replace with your image path
+image = Image.open(image_path).convert("RGB")
 
-# -------------------------
-# Utilities
-# -------------------------
-def ensure_dir(d):
-    if not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
+# -------------------------------
+# 3. Preprocess image
+# -------------------------------
+inputs = processor(images=image, return_tensors="pt").to(model.device)
 
-def pil_to_cv2(image: Image.Image):
-    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+# -------------------------------
+# 4. Run inference
+# -------------------------------
+with torch.no_grad():
+    generated_ids = model.generate(**inputs, max_new_tokens=128)
 
-def bbox_area(bbox):
-    x1, y1, x2, y2 = bbox
-    return max(0, x2-x1) * max(0, y2-y1)
-
-# -------------------------
-# Main Pipeline
-# -------------------------
-class FormOCRPipeline:
-    def __init__(self, device='cuda'):
-        self.device = device if torch.cuda.is_available() else 'cpu'
-        print(f"[INFO] Using device: {self.device}")
-
-        # 1) Layout model (Detectron2 via LayoutParser)
-        # Using a standard PubLayNet-trained Faster R-CNN (good for text blocks, titles, figures, tables)
-        # lp provides model shortcodes; use one compatible with your setup:
-        # If detectron2 install succeeded, this should work.
-        print("[INFO] Loading layout/detection model (Detectron2)...")
-        self.layout_model = lp.Detectron2LayoutModel(
-            config_path='lp://PubLayNet/faster_rcnn_R_50_FPN_3x/config',
-            label_map={0:"Text", 1:"Title", 2:"List", 3:"Table", 4:"Figure"}
-        )
-
-        # 2) PaddleOCR - main OCR (printed + handwriting decent)
-        print("[INFO] Loading PaddleOCR (GPU if available)...")
-        # lang='en' - you can add 'en' + other languages if needed
-        self.paddleocr = PaddleOCR(use_angle_cls=True, lang='en')  # autodetects GPU if paddle is GPU build
-
-        # 3) TrOCR (handwritten) - fallback
-        print("[INFO] Loading TrOCR handwritten model (fallback)...")
-        # model choice: microsoft/trocr-base-handwritten (if available). Use smaller if memory constrained.
-        try:
-            self.trocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
-            self.trocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten").to(self.device)
-            # set generation params
-            self.trocr_model.config.max_length = 256
-            self.trocr_model.config.num_beams = 4
-            self.use_trocr = True
-        except Exception as e:
-            print("[WARN] TrOCR fallback model failed to load:", e)
-            print("[WARN] Handwritten fallback disabled; will rely on PaddleOCR only.")
-            self.use_trocr = False
-
-    def detect_layout(self, pil_image: Image.Image):
-        # returns list of lp.TextBlock/... objects
-        image_np = np.array(pil_image)
-        layout = self.layout_model.detect(image_np)
-        # keep Text blocks and Tables maybe
-        text_blocks = [b for b in layout if b.type in ("Text","Title","List","Table")]
-        # sort top-to-bottom
-        text_blocks = lp.sort_blocks(text_blocks, horizontal=False)
-        return text_blocks
-
-    def ocr_region_paddle(self, pil_region: Image.Image):
-        # PaddleOCR expects path or numpy image in BGR
-        img_cv2 = pil_to_cv2(pil_region)
-        # result: list of lines [ [ (x1,y1),(x2,y2),(x3,y3),(x4,y4) ], (text, confidence) ]
-        result = self.paddleocr.ocr(img_cv2, cls=True)
-        # join results line by line
-        lines = []
-        confs = []
-        for line in result:
-            line_text = line[1][0]
-            conf = float(line[1][1]) if line[1][1] is not None else 0.0
-            lines.append(line_text)
-            confs.append(conf)
-        full_text = "\n".join(lines).strip()
-        avg_conf = float(np.mean(confs)) if confs else 0.0
-        return full_text, avg_conf
-
-    def ocr_region_trocr(self, pil_region: Image.Image):
-        if not self.use_trocr:
-            return "", 0.0
-        # prepare image for trocr: processor expects PIL RGB
-        pixel_values = self.trocr_processor(images=pil_region, return_tensors="pt").pixel_values.to(self.device)
-        output_ids = self.trocr_model.generate(pixel_values, max_length=256, num_beams=4)
-        pred_str = self.trocr_processor.batch_decode(output_ids, skip_special_tokens=True)[0]
-        pred_str = pred_str.strip()
-        # No explicit confidence from generate; we return length-based proxy
-        proxy_conf = min(0.95, 0.05 + 0.01 * len(pred_str.split()))
-        return pred_str, proxy_conf
-
-    def process_page(self, pil_page: Image.Image, page_idx: int):
-        regions = self.detect_layout(pil_page)
-        page_results = []
-        img_w, img_h = pil_page.size
-
-        for ridx, block in enumerate(regions):
-            # block.block.coordinates gives polygon; get bbox
-            x1, y1, x2, y2 = map(int, [block.block.x_1, block.block.y_1, block.block.x_2, block.block.y_2])
-            # clip
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(img_w, x2), min(img_h, y2)
-            if x2 <= x1 or y2 <= y1: 
-                continue
-            crop = pil_page.crop((x1, y1, x2, y2))
-
-            # 1) PaddleOCR first
-            paddle_text, paddle_conf = self.ocr_region_paddle(crop)
-
-            chosen_text = paddle_text
-            chosen_conf = paddle_conf
-            chosen_model = "paddleocr"
-
-            # 2) If paddle confidence low, run TrOCR fallback
-            # heuristics: if avg conf < 0.65 or text is too short, try trocr
-            if (paddle_conf < 0.65 or len(paddle_text) < 5) and self.use_trocr:
-                trocr_text, trocr_conf = self.ocr_region_trocr(crop)
-                # pick trocr if it seems better (longer and not empty)
-                if len(trocr_text) > len(paddle_text) and len(trocr_text) > 1:
-                    chosen_text = trocr_text
-                    chosen_conf = trocr_conf
-                    chosen_model = "trocr"
-
-            page_results.append({
-                "region_index": ridx,
-                "bbox": [x1, y1, x2, y2],
-                "area": bbox_area((x1,y1,x2,y2)),
-                "pred_text": chosen_text,
-                "confidence": float(chosen_conf),
-                "model_used": chosen_model,
-                "layout_type": block.type
-            })
-
-        # Sort regions by top-left coordinate (optional)
-        page_results = sorted(page_results, key=lambda r: (r["bbox"][1], r["bbox"][0]))
-        return page_results
-
-    def process_pdf(self, pdf_path, out_dir="output", dpi=300):
-        ensure_dir(out_dir)
-        pages_dir = os.path.join(out_dir, "pages")
-        ensure_dir(pages_dir)
-
-        basename = os.path.splitext(os.path.basename(pdf_path))[0]
-        print(f"[INFO] Converting PDF -> images (dpi={dpi}) ...")
-        pil_pages = convert_from_path(pdf_path, dpi=dpi)
-
-        all_pages_data = {"pdf": pdf_path, "pages": []}
-        for i, pil_page in enumerate(pil_pages, start=1):
-            print(f"[INFO] Processing page {i}/{len(pil_pages)}")
-            page_img_path = os.path.join(pages_dir, f"{basename}_page_{i:03d}.png")
-            pil_page.save(page_img_path)
-            # process
-            page_data = self.process_page(pil_page, i)
-            all_pages_data["pages"].append({
-                "page_index": i,
-                "image_path": page_img_path,
-                "regions": page_data
-            })
-
-        # save final JSON
-        out_json = os.path.join(out_dir, f"extracted_{basename}.json")
-        with open(out_json, "w", encoding="utf-8") as f:
-            json.dump(all_pages_data, f, ensure_ascii=False, indent=2)
-
-        print(f"[DONE] Extraction complete. JSON saved to: {out_json}")
-        return all_pages_data
-
-# -------------------------
-# CLI
-# -------------------------
-def main():
-    parser = argparse.ArgumentParser(description="PDF Form OCR pipeline")
-    parser.add_argument("--pdf", required=True, help="Path to PDF file")
-    parser.add_argument("--out", default="output", help="Output folder")
-    parser.add_argument("--dpi", type=int, default=300, help="PDF -> image DPI (higher = better accuracy)")
-    args = parser.parse_args()
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    pipeline = FormOCRPipeline(device=device)
-    pipeline.process_pdf(args.pdf, out_dir=args.out, dpi=args.dpi)
-
-if __name__ == "__main__":
-    main()
+# -------------------------------
+# 5. Decode text
+# -------------------------------
+text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+print("📝 Handwritten OCR result:", text)
