@@ -1,0 +1,55 @@
+from transformers import AutoProcessor, AutoModelForCausalLM
+from pdf2image import convert_from_path
+from PIL import Image
+import torch
+import os
+
+# -------------------------------
+# 1. Load Florence-2 in fp16
+# -------------------------------
+model_id = "microsoft/Florence-2-large"
+
+processor = AutoProcessor.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    torch_dtype=torch.float16,        # 16-bit precision
+    device_map="auto",                # use GPU if available, else CPU
+    offload_folder="offload"          # if GPU memory is small, offload parts to CPU
+)
+
+# -------------------------------
+# 2. Convert PDF → Images
+# -------------------------------
+pdf_path = "your_file.pdf"   # replace with your PDF file
+pages = convert_from_path(pdf_path, dpi=200)  # increase dpi for better accuracy
+
+# -------------------------------
+# 3. OCR each page using VLM
+# -------------------------------
+all_text = []
+for i, page in enumerate(pages, start=1):
+    print(f"🔎 Processing page {i}/{len(pages)}...")
+
+    # Convert page to RGB (Florence requires RGB images)
+    image = page.convert("RGB")
+
+    # Prepare VLM input
+    prompt = "<OCR>"
+    inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
+
+    # Generate output
+    with torch.no_grad():
+        generated_ids = model.generate(**inputs, max_new_tokens=1024)
+
+    # Decode text
+    text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    all_text.append(f"\n--- Page {i} ---\n{text}\n")
+
+# -------------------------------
+# 4. Save extracted text
+# -------------------------------
+output_path = "extracted_text.txt"
+with open(output_path, "w", encoding="utf-8") as f:
+    f.writelines(all_text)
+
+print(f"\n✅ Done! Extracted text saved to {output_path}")
