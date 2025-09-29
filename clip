@@ -1,0 +1,28 @@
+import torch
+import clip
+from PIL import Image
+
+# Load the CLIP model
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model, preprocess = clip.load("ViT-B/32", device=device)
+
+# Load your image
+image = preprocess(Image.open("your_image.jpg")).unsqueeze(0).to(device)
+
+# Define your class prompts
+texts = ["A medical document, such as a prescription or lab report",
+         "A non-medical document, such as an invoice, letter, or receipt"]
+text_tokens = clip.tokenize(texts).to(device)
+
+# Get CLIP predictions
+with torch.no_grad():
+    image_features = model.encode_image(image)
+    text_features = model.encode_text(text_tokens)
+
+    # Normalize features
+    image_features /= image_features.norm(dim=-1, keepdim=True)
+    text_features /= text_features.norm(dim=-1, keepdim=True)
+
+    # Compute similarity
+    similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+    print(similarity)  # Probabilities for each class
