@@ -1,0 +1,35 @@
+from transformers import AutoProcessor, AutoModelForCausalLM
+from PIL import Image
+import torch
+
+# Load the model and processor
+model_id = "microsoft/Florence-2-large"
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True).to(device)
+processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+# Load your image
+image_path = "path_to_your_image.jpg"
+image = Image.open(image_path).convert("RGB")
+
+# Define the task prompt
+task_prompt = "<OD>"  # Object Detection task
+
+# Define the candidate labels
+candidate_labels = ["medical document", "non-medical document"]
+
+# Prepare the inputs
+inputs = processor(images=image, text=task_prompt, return_tensors="pt").to(device)
+
+# Perform inference
+with torch.no_grad():
+    outputs = model.generate(**inputs, max_new_tokens=1)
+
+# Decode the output
+decoded_output = processor.decode(outputs[0], skip_special_tokens=True)
+
+# Determine the classification
+if candidate_labels[0].lower() in decoded_output.lower():
+    print("This is a medical document.")
+else:
+    print("This is a non-medical document.")
