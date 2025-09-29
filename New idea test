@@ -1,79 +1,76 @@
-import pandas as pd import numpy as np from scipy.stats import ks_2samp, chi2_contingency, entropy, ttest_ind, pearsonr from sklearn.metrics import mutual_info_score import matplotlib.pyplot as plt import seaborn as sns
+import re
+from collections import defaultdict
+from rapidfuzz import fuzz
 
---- Evaluation Tests Between Real and Synthetic Data ---
+# ---------------------------
+# 1. Extended keywords per category
+# ---------------------------
+keywords = {
+    "Medical Document": [
+        "prescription", "prescripton", "prescrption",
+        "lab report", "labreport", "lab-report",
+        "patient", "diagnosis", "hospital",
+        "blood test", "medical record", "physician",
+        "medication", "treatment", "clinic", "doctor", "nurse"
+    ],
+    "Proposal Form": [
+        "insurance", "policy", "proposal form", "policyholder",
+        "premium", "sum insured", "coverage", "beneficiary",
+        "claim", "application", "renewal", "form"
+    ],
+    "Junk": [
+        "invoice", "receipt", "advertisement", "newsletter",
+        "offer", "discount", "promotion", "bill",
+        "ticket", "flyer", "catalogue", "voucher"
+    ]
+}
 
-def evaluate_synthetic_quality(df_real, df_synth): print("\n--- Statistical Comparison Between Real and Synthetic Data ---") results = {}
+# ---------------------------
+# 2. Preprocess text
+# ---------------------------
+def preprocess_text(text):
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
-for col in df_real.columns:
-    if df_real[col].dtype == 'O' or df_real[col].dtype.name == 'category':
-        real_counts = df_real[col].value_counts()
-        synth_counts = df_synth[col].value_counts()
-        combined = pd.concat([real_counts, synth_counts], axis=1).fillna(0)
-        stat, p, _, _ = chi2_contingency(combined.T)
-        ent_real = entropy(real_counts + 1)
-        ent_synth = entropy(synth_counts + 1)
-        results[col] = {
-            'type': 'categorical',
-            'chi2_stat': stat, 
-            'p_value': p,
-            'entropy_diff': abs(ent_real - ent_synth)
-        }
-    else:
-        stat_ks, p_ks = ks_2samp(df_real[col], df_synth[col])
-        stat_t, p_t = ttest_ind(df_real[col], df_synth[col], equal_var=False)
-        results[col] = {
-            'type': 'numerical',
-            'ks_stat': stat_ks,
-            'ks_p': p_ks,
-            't_stat': stat_t,
-            't_p': p_t,
-            'mean_real': df_real[col].mean(),
-            'mean_synth': df_synth[col].mean(),
-            'std_diff': abs(df_real[col].std() - df_synth[col].std())
-        }
-return results
+# ---------------------------
+# 3. Robust classifier with default junk
+# ---------------------------
+def classify_text(text, threshold=70):
+    text = preprocess_text(text)
+    scores = defaultdict(int)
+    words_in_text = text.split()
 
---- Correlation Matrix Comparison ---
+    # Count keyword matches with fuzzy matching
+    for category, word_list in keywords.items():
+        if category == "Junk":
+            continue  # skip junk for scoring
+        for keyword in word_list:
+            for word in words_in_text:
+                if fuzz.partial_ratio(word, keyword) >= threshold:
+                    scores[category] += 1
+                    break  # count keyword only once per text
 
-def compare_correlations(df_real, df_synth): num_cols = df_real.select_dtypes(include=[np.number]).columns corr_real = df_real[num_cols].corr() corr_synth = df_synth[num_cols].corr() diff = (corr_real - corr_synth).abs() return diff
+    # If no matches found in Medical or Proposal, default to Junk
+    if not scores or max(scores.values()) == 0:
+        return "Junk"
 
---- Mutual Information Matrix Comparison ---
+    # Otherwise, return category with highest score
+    max_category = max(scores, key=scores.get)
+    return max_category
 
-def compare_mutual_info(df_real, df_synth): mi_real = pd.DataFrame(index=df_real.columns, columns=df_real.columns) mi_synth = pd.DataFrame(index=df_synth.columns, columns=df_synth.columns)
+# ---------------------------
+# 4. Test examples
+# ---------------------------
+examples = [
+    "Patient Name: John Doe, Prescription for medication and blood test.",
+    "Insurance proposal form for Mr. Sharma, sum insured 5 lakhs.",
+    "Invoice for groceries and shopping from Amazon.",
+    "Random text with nothing relevant.",
+    "Patint diagnos report for bloodtes",  # OCR typo
+    "Polcy applicaton for insurence claim renewal"  # OCR typo
+]
 
-for col1 in df_real.columns:
-    for col2 in df_real.columns:
-        mi_real.loc[col1, col2] = mutual_info_score(df_real[col1], df_real[col2])
-        mi_synth.loc[col1, col2] = mutual_info_score(df_synth[col1], df_synth[col2])
-
-mi_real = mi_real.astype(float)
-mi_synth = mi_synth.astype(float)
-return (mi_real - mi_synth).abs()
-
---- Plot Comparison (Optional Visual Aid) ---
-
-def plot_distributions(df_real, df_synth): for col in df_real.columns: plt.figure(figsize=(6, 3)) if df_real[col].dtype in [np.float64, np.int64]: sns.kdeplot(df_real[col], label='Real', fill=True) sns.kdeplot(df_synth[col], label='Synthetic', fill=True) else: real_counts = df_real[col].value_counts(normalize=True) synth_counts = df_synth[col].value_counts(normalize=True) compare_df = pd.DataFrame({ 'Real': real_counts, 'Synthetic': synth_counts }).fillna(0) compare_df.plot(kind='bar') plt.title(f'Distribution: {col}') plt.legend() plt.tight_layout() plt.show()
-
---- Run All Comparisons ---
-
-def run_full_comparison(df_real, df_synth): results = evaluate_synthetic_quality(df_real, df_synth) corr_diff = compare_correlations(df_real, df_synth) mi_diff = compare_mutual_info(df_real, df_synth)
-
-print("\n--- Column-wise Test Results ---")
-for col, res in results.items():
-    print(f"\nColumn: {col} ({res['type']})")
-    for k, v in res.items():
-        if k != 'type':
-            print(f"  {k}: {v:.4f}")
-
-print("\n--- Correlation Matrix Difference (abs) ---")
-print(corr_diff.round(3))
-
-print("\n--- Mutual Information Difference (abs) ---")
-print(mi_diff.round(3))
-
-plot_distributions(df_real, df_synth)
-
---- Example Call (replace df_real and df_synthetic accordingly) ---
-
-run_full_comparison(df_real, df_synthetic)
-
+for text in examples:
+    print(f"Text: {text[:50]}... -> Class: {classify_text(text)}")
