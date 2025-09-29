@@ -1,0 +1,76 @@
+import re
+from collections import defaultdict
+from rapidfuzz import fuzz
+
+# ---------------------------
+# 1. Extended keywords per category
+# ---------------------------
+keywords = {
+    "Medical Document": [
+        "prescription", "prescripton", "prescrption",
+        "lab report", "labreport", "lab-report",
+        "patient", "diagnosis", "hospital",
+        "blood test", "medical record", "physician",
+        "medication", "treatment", "clinic", "doctor", "nurse"
+    ],
+    "Proposal Form": [
+        "insurance", "policy", "proposal form", "policyholder",
+        "premium", "sum insured", "coverage", "beneficiary",
+        "claim", "application", "renewal", "form"
+    ],
+    "Junk": [
+        "invoice", "receipt", "advertisement", "newsletter",
+        "offer", "discount", "promotion", "bill",
+        "ticket", "flyer", "catalogue", "voucher"
+    ]
+}
+
+# ---------------------------
+# 2. Preprocess text
+# ---------------------------
+def preprocess_text(text):
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+# ---------------------------
+# 3. Robust classifier with default junk
+# ---------------------------
+def classify_text(text, threshold=70):
+    text = preprocess_text(text)
+    scores = defaultdict(int)
+    words_in_text = text.split()
+
+    # Count keyword matches with fuzzy matching
+    for category, word_list in keywords.items():
+        if category == "Junk":
+            continue  # skip junk for scoring
+        for keyword in word_list:
+            for word in words_in_text:
+                if fuzz.partial_ratio(word, keyword) >= threshold:
+                    scores[category] += 1
+                    break  # count keyword only once per text
+
+    # If no matches found in Medical or Proposal, default to Junk
+    if not scores or max(scores.values()) == 0:
+        return "Junk"
+
+    # Otherwise, return category with highest score
+    max_category = max(scores, key=scores.get)
+    return max_category
+
+# ---------------------------
+# 4. Test examples
+# ---------------------------
+examples = [
+    "Patient Name: John Doe, Prescription for medication and blood test.",
+    "Insurance proposal form for Mr. Sharma, sum insured 5 lakhs.",
+    "Invoice for groceries and shopping from Amazon.",
+    "Random text with nothing relevant.",
+    "Patint diagnos report for bloodtes",  # OCR typo
+    "Polcy applicaton for insurence claim renewal"  # OCR typo
+]
+
+for text in examples:
+    print(f"Text: {text[:50]}... -> Class: {classify_text(text)}")
