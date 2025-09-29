@@ -1,35 +1,43 @@
-from transformers import AutoProcessor, AutoModelForCausalLM
-from PIL import Image
-import torch
+import os
+import pandas as pd
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+from azure.core.credentials import AzureKeyCredential
 
-# Load the model and processor
-model_id = "microsoft/Florence-2-large"
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True).to(device)
-processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+# --------- CONFIG ----------
+endpoint = "<YOUR_ENDPOINT>"   # e.g. "https://<your-resource-name>.cognitiveservices.azure.com/"
+key = "<YOUR_KEY>"
+pdf_path = "sample.pdf"        # local PDF file
+# ----------------------------
 
-# Load your image
-image_path = "path_to_your_image.jpg"
-image = Image.open(image_path).convert("RGB")
+# Initialize client
+client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
 
-# Define the task prompt
-task_prompt = "<OD>"  # Object Detection task
+# Open PDF
+with open(pdf_path, "rb") as f:
+    poller = client.begin_analyze_document(
+        model_id="prebuilt-read",   # OCR/read model
+        analyze_request=f,
+        content_type="application/pdf"
+    )
 
-# Define the candidate labels
-candidate_labels = ["medical document", "non-medical document"]
+result = poller.result()
 
-# Prepare the inputs
-inputs = processor(images=image, text=task_prompt, return_tensors="pt").to(device)
+# Collect page-wise text
+rows = []
+for page in result.pages:
+    page_num = page.page_number
+    # Collect all lines for this page
+    text_lines = []
+    for line in result.paragraphs:
+        if line.bounding_regions and line.bounding_regions[0].page_number == page_num:
+            text_lines.append(line.content)
+    page_text = "\n".join(text_lines)
+    
+    rows.append({"page_num": page_num, "ocr_text": page_text})
 
-# Perform inference
-with torch.no_grad():
-    outputs = model.generate(**inputs, max_new_tokens=1)
+# Create DataFrame
+df = pd.DataFrame(rows)
+print(df.head())
 
-# Decode the output
-decoded_output = processor.decode(outputs[0], skip_special_tokens=True)
-
-# Determine the classification
-if candidate_labels[0].lower() in decoded_output.lower():
-    print("This is a medical document.")
-else:
-    print("This is a non-medical document.")
+# Save if needed
+df.to_csv("pdf_ocr_output.csv", index=False)
