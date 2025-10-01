@@ -1,0 +1,86 @@
+# ------------------------------
+# Requirements:
+# pip install azure-ai-formrecognizer pandas tqdm
+# ------------------------------
+
+import os
+import pandas as pd
+from azure.ai.formrecognizer import DocumentAnalysisClient
+from azure.core.credentials import AzureKeyCredential
+from tqdm import tqdm
+
+# ------------------------------
+# 1️⃣ Azure Document Intelligence Setup
+# ------------------------------
+endpoint = "https://<YOUR_AZURE_FORM_RECOGNIZER_ENDPOINT>.cognitiveservices.azure.com/"
+key = "<YOUR_AZURE_FORM_RECOGNIZER_KEY>"
+
+client = DocumentAnalysisClient(
+    endpoint=endpoint,
+    credential=AzureKeyCredential(key)
+)
+
+# ------------------------------
+# 2️⃣ Function to extract page-wise text from a PDF
+# ------------------------------
+def extract_text_from_pdf(file_path: str) -> pd.DataFrame:
+    """
+    Extracts OCR/text from a PDF file using Azure Document Intelligence.
+    Returns a DataFrame with columns: path_file, page_no, ocr_text
+    """
+    with open(file_path, "rb") as f:
+        poller = client.begin_analyze_document("prebuilt-document", document=f)
+        result = poller.result()
+
+    rows = []
+    for i, page in enumerate(result.pages, start=1):
+        page_text = ""
+        for line in page.lines:
+            page_text += line.content + " "
+        page_text = page_text.strip()
+        rows.append({
+            "path_file": file_path,
+            "page_no": i,
+            "ocr_text": page_text
+        })
+
+    df = pd.DataFrame(rows)
+    return df
+
+# ------------------------------
+# 3️⃣ Function to process multiple PDFs in a folder
+# ------------------------------
+def extract_text_from_folder(folder_path: str) -> pd.DataFrame:
+    """
+    Loops through all PDFs in a folder and extracts text page-wise.
+    Returns a single concatenated DataFrame.
+    """
+    all_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.lower().endswith(".pdf")]
+    all_dfs = []
+
+    for file_path in tqdm(all_files, desc="Processing PDFs"):
+        try:
+            df = extract_text_from_pdf(file_path)
+            all_dfs.append(df)
+        except Exception as e:
+            print(f"Failed to process {file_path}: {e}")
+
+    if all_dfs:
+        final_df = pd.concat(all_dfs, ignore_index=True)
+    else:
+        final_df = pd.DataFrame(columns=["path_file", "page_no", "ocr_text"])
+
+    return final_df
+
+# ------------------------------
+# 4️⃣ Example usage
+# ------------------------------
+if __name__ == "__main__":
+    folder_path = "./pdf_folder"  # Replace with your folder containing PDFs
+    df_all = extract_text_from_folder(folder_path)
+
+    # Show DataFrame
+    print(df_all.head())
+
+    # Optionally save to CSV
+    df_all.to_csv("pdf_pagewise_text.csv", index=False)
