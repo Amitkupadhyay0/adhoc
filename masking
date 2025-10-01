@@ -1,0 +1,259 @@
+"""
+robust_masker.py
+
+Dependencies:
+  pip install regex spacy
+  python -m spacy download en_core_web_sm   # optional but recommended for name/address masking
+
+Usage:
+  from robust_masker import Masker
+  masker = Masker()
+  masked_text, report = masker.mask_text(input_text)
+"""
+
+import re
+import regex           # pip install regex  (supports fuzzy and overlapped if needed)
+from typing import Tuple, Dict, List
+
+# Optional spaCy NER for names/locations.
+try:
+    import spacy
+    _SPACY_MODEL = None
+    try:
+        _SPACY_MODEL = spacy.load("en_core_web_sm")
+    except Exception:
+        _SPACY_MODEL = None
+except Exception:
+    spacy = None
+    _SPACY_MODEL = None
+
+# Helper: mask a match with a fixed char but preserving length optionally
+def _mask_preserve(s: str, mask_char: str = "X", preserve_length: bool = True) -> str:
+    if preserve_length:
+        return mask_char * len(s)
+    else:
+        return mask_char
+
+class Masker:
+    def __init__(self,
+                 mask_char: str = "X",
+                 preserve_length: bool = True,
+                 mask_email_local_part: bool = True,
+                 mask_domain: bool = False,
+                 mask_long_digit_threshold: int = 6,
+                 use_ner: bool = True):
+        """
+        Args:
+          mask_char: character used to mask.
+          preserve_length: if True replaces text with same number of mask_char; else single mask_char.
+          mask_email_local_part: mask the 'local' part (before @) of emails.
+          mask_domain: if True mask domain as well (not recommended usually).
+          mask_long_digit_threshold: mask any continuous digit sequence >= this.
+          use_ner: attempt spaCy NER masking for PERSON/GPE/LOC if spaCy model available.
+        """
+        self.mask_char = mask_char
+        self.preserve_length = preserve_length
+        self.mask_email_local_part = mask_email_local_part
+        self.mask_domain = mask_domain
+        self.mask_long_digit_threshold = mask_long_digit_threshold
+        self.use_ner = use_ner and (_SPACY_MODEL is not None)
+
+        # Precompile regexes (careful ordering: specific -> general)
+        # Aadhaar: 12 digits possibly separated by spaces/dashes
+        self.re_aadhaar = re.compile(r"\b(?:\d{4}\s?\d{4}\s?\d{4}|\d{12})\b")
+        # PAN: 5 letters + 4 digits + 1 letter (case-insensitive)
+        self.re_pan = re.compile(r"\b([A-Z]{5}\d{4}[A-Z])\b", flags=re.IGNORECASE)
+        # Passport (Indian typical: letter + 7 digits or 8): e.g. A1234567
+        self.re_passport = re.compile(r"\b([A-PR-WYa-pr-wy]\d{7})\b")
+        # Driving licence (various formats): somewhat generic alnum 6-16 with DL keywords
+        self.re_dl = re.compile(r"\b(?:(?:dl|driving license|driving licence|drivinglicence|drivinglicense)[\s:.-]*)?([a-zA-Z0-9\-\/]{6,16})\b", flags=re.IGNORECASE)
+        # Voter EPIC: alnum 6-20 often contains letters+digits; check for VOTER keywords
+        self.re_voter = re.compile(r"\b(?:(?:voter id|voterid|epic|electors photo identity card)[\s:.-]*)?([A-Z0-9]{3,20})\b", flags=re.IGNORECASE)
+        # UIDs like 16/12 digit sequences generic (we'll mask any >= threshold later)
+        # Indian PIN code: 6 digit
+        self.re_pin = re.compile(r"\b\d{6}\b")
+        # Mobile / telephone: many formats, with optional +91, 91, separators
+        self.re_phone = re.compile(r"""
+            (?:(?:\+?91[\-\s\.]?)|(?:\(?0?\d{1,4}\)?[\-\s\.]?))?   # country or trunk optional
+            (?:\d{3}[\-\s\.]?\d{3}[\-\s\.]?\d{4}|\d{10})            # 10-digit variants
+            """, flags=re.VERBOSE)
+        # Emails
+        self.re_email = re.compile(r"([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)")
+        # Dates: many common formats (dd-mm-yyyy, dd/mm/yyyy, yyyy-mm-dd, dd Mon yyyy, 01 Jan 2020)
+        self.re_dates = re.compile(r"""
+            \b(?:
+                \d{1,2}[\/\-\.\s]\d{1,2}[\/\-\.\s]\d{2,4} |      # 01-01-2020, 1/1/20
+                \d{4}[\/\-\.\s]\d{1,2}[\/\-\.\s]\d{1,2} |      # 2020-01-01
+                (?:\d{1,2}\s(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s?\d{2,4}) # 1 Jan 2020
+            )\b
+            """, flags=re.IGNORECASE | re.VERBOSE)
+        # URLs / IP addresses
+        self.re_url = re.compile(r"\bhttps?://[^\s]+|\bwww\.[^\s]+", flags=re.IGNORECASE)
+        self.re_ip = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+        # Credit card like sequences (4 groups of 4)
+        self.re_credit_card = re.compile(r"\b(?:\d{4}[\s\-]){3}\d{4}\b")
+        # Generic long digit sequence >= threshold: compiled on the fly because threshold configurable
+        # Names/addresses by keyword: lines with 'address', 'residence', 'house', 'vill', 'city', 'pin'
+        self.address_keywords = re.compile(r"\b(address|addr|residence|house|village|vill|city|district|state|pin|pincode)\b", flags=re.IGNORECASE)
+        # Patterns that should be masked early if found with a label (policybazaar etc.)
+        self.gov_id_keywords = re.compile(r"\b(aadhaar|aadhar|adhaar|adhar|uidai|pan|pancard|passport|voter|voterid|epic|driving license|dl)\b", flags=re.IGNORECASE)
+
+    def _apply_regex_mask(self, text: str, pattern: re.Pattern, label: str, report: Dict[str, List[str]]):
+        def repl(m):
+            s = m.group(0)
+            masked = _mask_preserve(s, self.mask_char, self.preserve_length)
+            report.setdefault(label, []).append(s)
+            return masked
+        return pattern.sub(repl, text)
+
+    def mask_text(self, text: str) -> Tuple[str, Dict[str, List[str]]]:
+        """
+        Mask PII in the given text.
+
+        Returns:
+          (masked_text, report_dict) where report_dict maps label -> list of original strings masked.
+        """
+        if not text:
+            return text, {}
+
+        report: Dict[str, List[str]] = {}
+
+        out = text
+
+        # 1) Emails (mask local-part only by default)
+        def email_repl(m):
+            local, domain = m.groups()
+            report.setdefault("EMAIL", []).append(m.group(0))
+            if self.mask_email_local_part:
+                local_masked = self.mask_char * len(local) if self.preserve_length else self.mask_char
+            else:
+                local_masked = local
+            if self.mask_domain:
+                domain_masked = self.mask_char * len(domain) if self.preserve_length else self.mask_char
+            else:
+                domain_masked = domain
+            return f"{local_masked}@{domain_masked}"
+        out = self.re_email.sub(email_repl, out)
+
+        # 2) URLs and IPs
+        out = self._apply_regex_mask(out, self.re_url, "URL", report)
+        out = self._apply_regex_mask(out, self.re_ip, "IP", report)
+
+        # 3) Aadhaar-like numbers
+        out = self._apply_regex_mask(out, self.re_aadhaar, "AADHAAR", report)
+
+        # 4) PAN
+        out = self._apply_regex_mask(out, self.re_pan, "PAN", report)
+
+        # 5) Passport
+        out = self._apply_regex_mask(out, self.re_passport, "PASSPORT", report)
+
+        # 6) Driving licence (we will check presence of DL keywords and cautious masking)
+        # Only mask captured group if keyword exists nearby or the token looks like DL
+        def dl_repl(m):
+            full = m.group(0)
+            token = m.group(1)
+            # if explicit dl keywords in original match or context
+            if re.search(r"(dl|driving license|driving licence|drivinglicence|drivinglicense)", full, flags=re.IGNORECASE) or re.search(r"(dl|driving license|driver's license)", text, flags=re.IGNORECASE):
+                report.setdefault("DL", []).append(token)
+                return _mask_preserve(token, self.mask_char, self.preserve_length)
+            # if token has letters+digits pattern typical of DL, mask
+            if re.search(r"[A-Za-z]{1,2}\d{4,}", token):
+                report.setdefault("DL", []).append(token)
+                return _mask_preserve(token, self.mask_char, self.preserve_length)
+            return full  # leave as is
+        out = self.re_dl.sub(dl_repl, out)
+
+        # 7) Voter / EPIC - cautious: mask if voter keyword present in vicinity
+        def voter_repl(m):
+            token = m.group(1)
+            # if the context has 'voter' or 'epic'
+            if re.search(r"(voter|epic|electors photo identity card)", text, flags=re.IGNORECASE):
+                report.setdefault("VOTER", []).append(token)
+                return _mask_preserve(token, self.mask_char, self.preserve_length)
+            return m.group(0)
+        out = self.re_voter.sub(voter_repl, out)
+
+        # 8) Passport / credit card like etc.
+        out = self._apply_regex_mask(out, self.re_credit_card, "CREDIT_CARD", report)
+
+        # 9) PIN codes (6-digit)
+        out = self._apply_regex_mask(out, self.re_pin, "PIN_CODE", report)
+
+        # 10) Phone numbers (mask detected sequences)
+        out = self._apply_regex_mask(out, self.re_phone, "PHONE", report)
+
+        # 11) Dates
+        out = self._apply_regex_mask(out, self.re_dates, "DATE", report)
+
+        # 12) Generic continuous digit sequences >= threshold
+        generic_digits_pattern = re.compile(rf"\b\d{{{self.mask_long_digit_threshold},}}\b")
+        out = self._apply_regex_mask(out, generic_digits_pattern, f"DIGITS_{self.mask_long_digit_threshold}+", report)
+
+        # 13) Lines with address keywords: mask the whole line
+        def address_line_repl(m):
+            line = m.group(0)
+            report.setdefault("ADDRESS_LINE", []).append(line.strip())
+            return _mask_preserve(line, self.mask_char, self.preserve_length)
+        # Mask whole lines containing address keywords to be safe
+        out = regex.sub(r"(?im)^.*\b(?:address|addr|residence|house|village|vill|city|district|state|pin|pincode)\b.*$",
+                        lambda m: address_line_repl(m), out)
+
+        # 14) spaCy NER fallback for PERSON / GPE / LOC if enabled
+        if self.use_ner:
+            try:
+                doc = _SPACY_MODEL(out)
+                # mask PERSON and GPE and LOC
+                for ent in reversed(doc.ents):  # reverse to preserve char offsets when replacing
+                    if ent.label_ in ("PERSON", "GPE", "LOC", "ORG"):
+                        # heuristic: do not mask short common words
+                        text_ent = ent.text.strip()
+                        if len(text_ent) <= 2:
+                            continue
+                        report.setdefault(ent.label_, []).append(text_ent)
+                        start, end = ent.start_char, ent.end_char
+                        masked = _mask_preserve(text_ent, self.mask_char, self.preserve_length)
+                        out = out[:start] + masked + out[end:]
+            except Exception:
+                # drop spaCy errors silently — we've already done regex masking
+                pass
+
+        # 15) Final pass: very long alphanumeric tokens (>= 12) often IDs: mask
+        def long_alnum_repl(m):
+            tok = m.group(0)
+            report.setdefault("LONG_ALNUM", []).append(tok)
+            return _mask_preserve(tok, self.mask_char, self.preserve_length)
+        out = re.sub(r"\b[A-Za-z0-9]{12,}\b", long_alnum_repl, out)
+
+        # Normalize repeated mask sequences (optional) - skip so we preserve positions.
+
+        return out, report
+
+
+# ---------------------------
+# Example / quick test
+# ---------------------------
+if __name__ == "__main__":
+    masker = Masker(mask_char="X", preserve_length=True, use_ner=True)
+
+    sample = """
+    Patient name: Rahul Kumar
+    DOB: 12/05/1985
+    Aadhaar: 1234 5678 9123
+    PAN: ABCDE1234F
+    Passport: K1234567
+    DL: MH-12-20170012345
+    Voter ID: EPIC ABC1234567
+    Email: rahul.kumar@example.com
+    Mobile: +91-98765-43210
+    Address: 123, MG Road, Bangalore - 560001
+    PolicyBazaar reference: PBZ-998877
+    Bank acc: 123456789012
+    Random long number 98765432109876 in text.
+    """
+
+    masked, report = masker.mask_text(sample)
+    print("Masked text:\n", masked)
+    print("\nReport:")
+    for k,v in report.items():
+        print(k, "->", v)
