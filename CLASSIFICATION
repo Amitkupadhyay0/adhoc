@@ -1,0 +1,69 @@
+import re
+from rapidfuzz import fuzz
+
+def contains_fuzzy(text, keywords, threshold=85):
+    """Check if any keyword approximately matches tokens in text."""
+    for token in text.split():
+        for kw in keywords:
+            if fuzz.partial_ratio(token, kw) >= threshold:
+                return True
+    return False
+
+def classify_doc(text: str) -> str:
+    text_lower = text.lower()
+
+    # ---------- Aadhaar / IDs ----------
+    aadhaar_patterns = [
+        r"\b\d{4}\s\d{4}\s\d{4}\b",    # 1234 5678 9123
+        r"\b\d{12}\b"                  # continuous 12 digits
+    ]
+    for pat in aadhaar_patterns:
+        if re.search(pat, text_lower):
+            return "NM"
+
+    id_keywords = [
+        "aadhaar", "aadhar", "adhaar", "adhar", "uidai", "udai", "uidal",
+        "pan card", "pancard", "driving license", "dl no", 
+        "passport", "ration card", "voter id", "voterid"
+    ]
+    if any(k in text_lower for k in id_keywords) or contains_fuzzy(text_lower, id_keywords):
+        return "NM"
+
+    # ---------- Insurance / Financial Docs ----------
+    insurance_keywords = [
+        "policybazaar", "policy bazar", "insurance proposal", 
+        "premium", "nominee", "sum assured", "hdfc", "icici", "sbi", "maxlife"
+    ]
+    if any(k in text_lower for k in insurance_keywords) or contains_fuzzy(text_lower, insurance_keywords):
+        return "NM"
+
+    # ---------- Proposal / Application Docs ----------
+    proposal_keywords = [
+        "application form", "proposal form", "declaration", 
+        "customer copy", "address proof", "signature", "photograph"
+    ]
+    if any(k in text_lower for k in proposal_keywords) or contains_fuzzy(text_lower, proposal_keywords):
+        return "NM"
+
+    # ---------- Utility Bills / KYC ----------
+    utility_keywords = [
+        "electricity bill", "gas bill", "telephone bill", 
+        "water bill", "kyc", "mobile bill", "voter slip"
+    ]
+    if any(k in text_lower for k in utility_keywords) or contains_fuzzy(text_lower, utility_keywords):
+        return "NM"
+
+    # ---------- Income Proof / Finance ----------
+    income_keywords = [
+        "salary slip", "form 16", "bank statement", 
+        "itr", "income tax return", "payslip"
+    ]
+    if any(k in text_lower for k in income_keywords) or contains_fuzzy(text_lower, income_keywords):
+        return "NM"
+
+    # ---------- Junk / Spam ----------
+    if len(text.split()) < 5 or not re.search(r"[a-zA-Z0-9]", text):
+        return "NM"
+
+    # ---------- Default = Medical ----------
+    return "M"
