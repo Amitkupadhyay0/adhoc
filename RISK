@@ -1,0 +1,112 @@
+# ------------------------------
+# Azure OpenAI GPT-5-mini pipeline
+# ------------------------------
+from azure.ai.openai import OpenAIClient
+from azure.core.credentials import AzureKeyCredential
+import json
+import re
+
+# ------------------------------
+# 1️⃣ Setup Azure OpenAI client
+# ------------------------------
+endpoint = "https://<YOUR_AZURE_OPENAI_ENDPOINT>.openai.azure.com/"
+key = "<YOUR_AZURE_OPENAI_KEY>"
+
+client = OpenAIClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+
+# ------------------------------
+# 2️⃣ Report Summary Agent
+# ------------------------------
+def report_summary_agent(report_text: str) -> str:
+    """
+    Calls Azure GPT-5-mini to extract ped_found and medical_report_summary.
+    Returns GPT raw response text.
+    """
+    prompt = f"""
+You are a medical report summarization assistant.
+Extract ONLY in JSON format:
+
+{{
+  "ped_found": <True/False>,
+  "medical_report_summary": "<Summary of report, max 300 words>"
+}}
+
+Report:
+{report_text}
+
+Constraints:
+- Output must be valid JSON.
+- Summary max 300 words.
+"""
+    response = client.chat_completions.create(
+        deployment_name="gpt-5-mini",  # your Azure deployment name
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    
+    gpt_output = response.choices[0].message.content
+    return gpt_output
+
+# ------------------------------
+# 3️⃣ Parse GPT output to dictionary
+# ------------------------------
+def parse_summary_to_dict(gpt_text: str) -> dict:
+    """
+    Robust parser to ensure keys exist: ped_found and medical_report_summary.
+    """
+    default_dict = {"ped_found": False, "medical_report_summary": ""}
+    try:
+        data = json.loads(gpt_text)
+        ped_found = data.get("ped_found", False)
+        summary = data.get("medical_report_summary", "")
+        return {"ped_found": bool(ped_found), "medical_report_summary": str(summary)}
+    except Exception:
+        # Fallback heuristic
+        ped_found = bool(re.search(r"true|yes|present", gpt_text, re.IGNORECASE))
+        summary = " ".join(gpt_text.split())[:300*6]  # ~300 words approx
+        return {"ped_found": ped_found, "medical_report_summary": summary}
+
+# ------------------------------
+# 4️⃣ Risk Agent
+# ------------------------------
+def risk_agent(summary_dict: dict) -> dict:
+    """
+    Returns structured risk assessment:
+    {"diseases": {disease: {"possible_risk": True/False}}, "is_risky": True/False}
+    """
+    summary_text = summary_dict.get("medical_report_summary", "").lower()
+    diseases = ["diabetes", "hypertension", "heart disease", "asthma", "kidney disease"]
+    disease_risk = {}
+    risky_flag = False
+    
+    for d in diseases:
+        risk = d in summary_text
+        disease_risk[d] = {"possible_risk": risk}
+        if risk:
+            risky_flag = True
+
+    # Factor ped_found
+    if summary_dict.get("ped_found", False):
+        risky_flag = True
+
+    return {"diseases": disease_risk, "is_risky": risky_flag}
+
+# ------------------------------
+# 5️⃣ Example usage
+# ------------------------------
+if __name__ == "__main__":
+    sample_report = """
+    Patient: John Doe, age 45.
+    History of diabetes for 5 years.
+    Blood pressure is 140/90.
+    Prescribed metformin 500mg daily.
+    No history of heart disease.
+    """
+
+    gpt_raw = report_summary_agent(sample_report)
+    summary_dict = parse_summary_to_dict(gpt_raw)
+    risk_output = risk_agent(summary_dict)
+
+    print("GPT Raw Output:\n", gpt_raw)
+    print("\nStructured Summary Dict:\n", summary_dict)
+    print("\nRisk Assessment Output:\n", risk_output)
