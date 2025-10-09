@@ -1,0 +1,96 @@
+import psycopg2
+import pandas as pd
+from io import StringIO
+import numpy as np
+from multiprocessing import Pool, cpu_count
+
+# ---------------------------------------
+# 1. Connect to Postgres
+# ---------------------------------------
+def get_connection():
+    return psycopg2.connect(
+        dbname="mydb",
+        user="myuser",
+        password="mypassword",
+        host="your-rds-endpoint.amazonaws.com",
+        port=5432
+    )
+
+# ---------------------------------------
+# 2. Get column order from PostgreSQL
+# ---------------------------------------
+def get_pg_columns(conn, table):
+    query = f"""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = '{table}'
+        ORDER BY ordinal_position;
+    """
+    with conn.cursor() as cur:
+        cur.execute(query)
+        return [row[0] for row in cur.fetchall()]
+
+# ---------------------------------------
+# 3. Align DataFrame to PostgreSQL schema
+# ---------------------------------------
+def align_dataframe(df, pg_cols):
+    for col in pg_cols:
+        if col not in df.columns:
+            df[col] = None
+    return df[pg_cols]
+
+# ---------------------------------------
+# 4. COPY one chunk into PostgreSQL
+# ---------------------------------------
+def copy_chunk(args):
+    chunk, table, pg_cols = args
+    conn = get_connection()
+    try:
+        chunk = align_dataframe(chunk, pg_cols)
+
+        buffer = StringIO()
+        chunk.to_csv(buffer, index=False, header=False)
+        buffer.seek(0)
+
+        cols = ",".join(chunk.columns)
+        with conn.cursor() as cur:
+            cur.copy_expert(f"COPY {table} ({cols}) FROM STDIN WITH CSV", buffer)
+        conn.commit()
+        return len(chunk)
+    finally:
+        conn.close()
+
+# ---------------------------------------
+# 5. Parallel Loader
+# ---------------------------------------
+def load_dataframe_parallel(df, table, chunksize=1_000_000, workers=None):
+    conn = get_connection()
+    pg_cols = get_pg_columns(conn, table)
+    conn.close()
+
+    # Split dataframe into chunks
+    chunks = [df.iloc[i:i+chunksize] for i in range(0, len(df), chunksize)]
+
+    # Use all available CPUs if workers not set
+    if workers is None:
+        workers = min(cpu_count(), len(chunks))
+
+    print(f"🚀 Starting parallel load with {workers} workers, {len(chunks)} chunks")
+
+    with Pool(workers) as pool:
+        results = pool.map(copy_chunk, [(chunk, table, pg_cols) for chunk in chunks])
+
+    print(f"✅ Loaded {sum(results)} rows into {table}")
+
+# =======================================
+# 🚀 Usage Example
+# =======================================
+if __name__ == "__main__":
+    # Example: 5M rows DataFrame
+    df = pd.DataFrame({
+        "id": range(1, 5_000_001),
+        "name": ["amit"] * 5_000_000,
+        "age": [25] * 5_000_000
+    })
+
+    load_dataframe_parallel(df, "my_table", chunksize=1_000_000, workers=4)
