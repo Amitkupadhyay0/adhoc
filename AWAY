@@ -1,0 +1,243 @@
+\documentclass[a4paper,11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{enumitem}
+
+\title{\textbf{Japan MMM Technical Questionnaire for Global Integration}}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\noindent \textit{Objective: To understand modelling structure of Japan for incorporating in Promofit in a better way.}
+
+\vspace{0.5cm}
+
+% ---------------- SECTION 1 ----------------
+\section*{Step 1: Data, Inputs \& Model Components}
+
+\begin{itemize}[noitemsep]
+
+\item Modeling time period
+\item Granularity
+\item What is the primary media input variable?
+
+\vspace{0.2cm}
+
+\item Specify all variables used in the model:
+\begin{itemize}
+\item Media variables
+\item Trend component
+\item Seasonality component
+\item Intercept / baseline
+\item Control variables (price, promotions, external factors, etc.)
+\end{itemize}
+
+\vspace{0.2cm}
+
+\item Provide the complete model equation (mathematical form)
+
+\vspace{0.2cm}
+
+\item If Bayesian / hierarchical model is used:
+\begin{itemize}
+\item Specify hierarchy levels
+\item Specify pooling type for parameters:
+  \begin{itemize}
+  \item Fully pooled
+  \item Partially pooled (hierarchical)
+  \item Non-pooled
+  \end{itemize}
+\end{itemize}
+
+\end{itemize}
+
+% ---------------- SECTION 2 ----------------
+\section*{Step 2: Model Structure}
+
+\subsection*{2.1 Carryover / Lag Effect (Adstock)}
+
+\begin{itemize}[noitemsep]
+
+\item Is adstock used? (Yes / No)
+
+\item If YES:
+\begin{itemize}
+\item Type (Geometric / Weibull / Other)
+\item Provide decay parameter value
+\item Specify level of estimation (global / channel / hierarchical)
+\end{itemize}
+
+\item If NO:
+\begin{itemize}
+\item How is lag / persistence captured in the model?
+\end{itemize}
+
+\end{itemize}
+
+\subsection*{2.2 Transformation Used per Channel (Diminishing Curve Capture)}
+
+\begin{itemize}[noitemsep]
+
+\item \textbf{Log / Power / Exponential Transformations}
+\begin{itemize}
+\item Provide exact functional form used per channel
+
+\item Examples:
+\begin{itemize}
+\item $\log(1 + c \cdot X)$
+\item $a \cdot \log(1 + c \cdot X)$
+\item $X^{c}$
+\item $\exp(c \cdot X)$
+\end{itemize}
+
+\item Specify all parameters (e.g., $a$, $c$)
+\item Provide formulation required to reverse-map to original scale
+\end{itemize}
+
+\vspace{0.2cm}
+
+\item \textbf{Hill Function}
+\begin{itemize}
+\item Parameters:
+\begin{itemize}
+\item $R_{max}$
+\item $K$ (half-saturation)
+\item $n$ (slope)
+\end{itemize}
+
+\item Level of estimation:
+\begin{itemize}
+\item Global
+\item Channel
+\item Hierarchical
+\end{itemize}
+\end{itemize}
+
+\vspace{0.2cm}
+
+\item \textbf{Sigmoid / S-Curve}
+\begin{itemize}
+\item Provide exact functional form
+\item Provide parameter values
+\end{itemize}
+
+\vspace{0.2cm}
+
+\item \textbf{Other Transformations}
+\begin{itemize}
+\item Specify transformation
+\item Provide parameters
+\item Provide reverse-mapping formulation
+\end{itemize}
+
+\end{itemize}
+
+\vspace{0.3cm}
+
+\subsection*{2.3 Parameter-Level Estimation (Detailed)}
+
+\begin{itemize}[noitemsep]
+
+\item Clearly specify the level at which each parameter is estimated:
+
+\begin{itemize}
+\item Global (single value across all data)
+\item Channel-level (different per channel)
+\item Lower-level (e.g., institution-level)
+\item Hierarchical (partially pooled across levels)
+\end{itemize}
+
+\vspace{0.2cm}
+
+\item Example format for clarity:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Estimation Level} \\
+\midrule
+Media coefficients & Channel-level \\
+Adstock decay & Global \\
+Hill parameters (Rmax, K, n) & Hierarchical \\
+Intercept & Global \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{itemize}
+
+% ---------------- SECTION 3 ----------------
+\section*{Step 3: Model Estimation \& Convergence}
+
+\begin{itemize}[noitemsep]
+
+\item Estimation method (MCMC / Variational Inference)
+\item Number of chains
+\item Iterations and warmup
+
+\vspace{0.2cm}
+
+\item Provide convergence diagnostics:
+\begin{itemize}
+\item R-hat values
+\item Effective Sample Size (ESS)
+\item Trace plots
+\end{itemize}
+
+\item Convergence threshold used (e.g., R-hat $<$ 1.01)
+
+\item Any parameters with:
+\begin{itemize}
+\item High R-hat
+\item Low ESS
+\item Poor chain mixing
+\end{itemize}
+
+\vspace{0.2cm}
+
+\item Are parameter estimates stable across:
+\begin{itemize}
+\item Chains
+\item Multiple runs
+\end{itemize}
+
+\end{itemize}
+
+% ---------------- SECTION 4 ----------------
+\section*{Step 4: Model Fit \& Validation}
+
+\begin{itemize}[noitemsep]
+
+\item Provide:
+\begin{itemize}
+\item Actual vs Predicted (overall)
+\item Actual vs Predicted (monthly)
+\item Residual plots
+\end{itemize}
+
+\item Performance metrics:
+\begin{itemize}
+\item R\textsuperscript{2}
+\item MAPE / RMSE
+\end{itemize}
+
+\item Validation:
+\begin{itemize}
+\item Holdout / out-of-sample performance
+\end{itemize}
+
+\item Residual diagnostics:
+\begin{itemize}
+\item Autocorrelation
+\item Bias over time
+\end{itemize}
+
+\end{itemize}
+
+\vspace{0.5cm}
+
+\noindent \textbf{:}
+
+\end{document}
