@@ -1,0 +1,142 @@
+# =========================================================
+# FULL MMM PIPELINE: Hyperparameter tuning + Bayesian fit
+# =========================================================
+
+import pandas as pd
+import numpy as np
+from itertools import product
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+from joblib import Parallel, delayed
+from tqdm import tqdm
+import pymc as pm
+import arviz as az
+import matplotlib.pyplot as plt
+
+# -------------------------------
+# 0. INPUTS
+# -------------------------------
+# df: dataframe with 'week_num', 'sales_volume', and media channels
+# X_media: list of media channel columns
+# Example:
+# X_media = ['TV','Digital','Search','OOH','Radio']
+
+# -------------------------------
+# 1. Adstock & Saturation functions
+# -------------------------------
+def adstock(x, lam):
+    out = np.zeros_like(x)
+    for i in range(len(x)):
+        out[i] = x[i] + (lam * out[i-1] if i > 0 else 0)
+    return out
+
+def saturation(x, alpha):
+    return x / (x + alpha)
+
+# -------------------------------
+# 2. Function to evaluate one channel
+# -------------------------------
+def evaluate_channel(channel, lam_grid, alpha_grid, y):
+    best_score = np.inf
+    best_params = {'lambda': None, 'alpha': None}
+    x_raw = df[channel].values
+    for lam, alpha in product(lam_grid, alpha_grid):
+        x_trans = saturation(adstock(x_raw, lam), alpha).reshape(-1,1)
+        model = LinearRegression().fit(x_trans, y)
+        pred = model.predict(x_trans)
+        score = mean_squared_error(y, pred)
+        if score < best_score:
+            best_score = score
+            best_params['lambda'] = lam
+            best_params['alpha'] = alpha
+    return channel, best_params
+
+# -------------------------------
+# 3. Define grids
+# -------------------------------
+lambda_grid = [0.2, 0.4, 0.6, 0.8]
+alpha_grid = []
+for ch in X_media:
+    percentiles = [10,25,50,75,90]
+    vals = [np.percentile(df[ch], p) for p in percentiles]
+    alpha_grid.extend(vals)
+alpha_grid = list(set(alpha_grid))  # remove duplicates
+
+# -------------------------------
+# 4. Parallelized grid search
+# -------------------------------
+y = df['sales_volume'].values
+results = Parallel(n_jobs=-1)(
+    delayed(evaluate_channel)(ch, lambda_grid, alpha_grid, y)
+    for ch in tqdm(X_media, desc='Tuning channels')
+)
+best_params_dict = {ch: params for ch, params in results}
+print("Best λ and α per channel:", best_params_dict)
+
+# -------------------------------
+# 5. Prepare transformed & scaled X
+# -------------------------------
+X_transformed = pd.DataFrame()
+for ch in X_media:
+    lam = best_params_dict[ch]['lambda']
+    alpha = best_params_dict[ch]['alpha']
+    X_transformed[ch] = saturation(adstock(df[ch].values, lam), alpha)
+
+scaler = StandardScaler()
+X_scaled = pd.DataFrame(scaler.fit_transform(X_transformed), columns=X_media)
+y_scaled = df['sales_volume'].values
+
+# -------------------------------
+# 6. Fourier terms for weekly seasonality
+# -------------------------------
+weeks = df['week_num'].rank(method='dense').astype(int).values
+T = len(df)
+n_harmonics = 3
+fourier_terms = []
+for k in range(1, n_harmonics+1):
+    fourier_terms.append(np.sin(2*np.pi*k*weeks/52))
+    fourier_terms.append(np.cos(2*np.pi*k*weeks/52))
+fourier_terms = np.column_stack(fourier_terms)
+
+# -------------------------------
+# 7. Bayesian MMM model
+# -------------------------------
+with pm.Model() as mmm_model:
+    # Trend
+    trend = pm.Normal("trend", mu=0, sigma=10)
+    # Seasonal coefficients
+    season_coefs = pm.Normal("season", mu=0, sigma=1, shape=fourier_terms.shape[1])
+    # Media coefficients (HalfNormal prior)
+    beta = pm.HalfNormal("beta", sigma=1, shape=len(X_media))
+    # Linear predictor
+    mu = trend * np.arange(T)
+    mu += pm.math.dot(fourier_terms, season_coefs)
+    mu += pm.math.dot(X_scaled.values, beta)
+    # Likelihood
+    sigma = pm.HalfNormal("sigma", sigma=10)
+    y_obs = pm.Normal("y_obs", mu=mu, sigma=sigma, observed=y_scaled)
+    # Sample
+    trace = pm.sample(2000, tune=1000, target_accept=0.95)
+
+# -------------------------------
+# 8. Posterior & model checks
+# -------------------------------
+# Summary
+summary = az.summary(trace, var_names=['beta','trend','season','sigma'])
+print(summary)
+
+# Posterior predictive check
+with mmm_model:
+    ppc = pm.sample_posterior_predictive(trace, var_names=['y_obs'])
+
+plt.figure(figsize=(10,5))
+plt.plot(y_scaled, label='Actual')
+plt.plot(ppc['y_obs'].mean(axis=0), label='Predicted', color='orange')
+plt.legend()
+plt.title('Posterior Predictive Check')
+plt.show()
+
+# Trace plots
+az.plot_trace(trace, var_names=['beta','trend','season'])
+plt.show()
